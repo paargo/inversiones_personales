@@ -10,6 +10,7 @@ import json
 import requests
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import yfinance as yf
 
 # Configuration
 # DATA_FILE = "investments.csv" # Deprecated
@@ -126,18 +127,79 @@ def save_settings(settings):
     if not df_config.empty:
         ws_settings.append_rows(df_config.values.tolist())
 
-def get_binance_price(ticker):
-    """Fetch current price for Ticker/USDT from Binance Public API"""
+def get_dolar_rates():
+    """Fetch MEP and CCL rates from dolarapi.com"""
+    rates = {"MEP": 0.0, "CCL": 0.0}
     try:
-        symbol = f"{ticker}USDT"
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
-        response = requests.get(url, timeout=5)
-        data = response.json()
-        if "price" in data:
-            return float(data["price"])
+        # Fetch MEP
+        resp_mep = requests.get("https://dolarapi.com/v1/dolares/bolsa", timeout=5)
+        if resp_mep.status_code == 200:
+            rates["MEP"] = resp_mep.json().get("venta", 0.0)
+            
+        # Fetch CCL
+        resp_ccl = requests.get("https://dolarapi.com/v1/dolares/contadoconliqui", timeout=5)
+        if resp_ccl.status_code == 200:
+            rates["CCL"] = resp_ccl.json().get("venta", 0.0)
+            
     except Exception as e:
-        print(f"Error fetching {ticker}: {e}")
-    return 0.0
+        print(f"Error fetching FX rates: {e}")
+    return rates
+
+def get_market_price(ticker, source):
+    """
+    Fetch current price from specified source.
+    Returns: (price, currency)
+    """
+    price = 0.0
+    currency = "USD" # Default
+    
+    try:
+        if source == "Binance API":
+            symbol = f"{ticker}USDT"
+            url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+            response = requests.get(url, timeout=5)
+            data = response.json()
+            if "price" in data:
+                price = float(data["price"])
+                currency = "USD"
+                
+        elif source == "Argentina (BYMA)":
+            # Append .BA if not present
+            symbol = ticker if ticker.endswith(".BA") else f"{ticker}.BA"
+            try:
+                stock = yf.Ticker(symbol)
+                # Fast fetch using history
+                hist = stock.history(period="1d")
+                if not hist.empty:
+                    price = hist["Close"].iloc[-1]
+                    # Try to detect currency from metadata, default to ARS for BYMA
+                    # yfinance info is sometimes slow, so we can infer or fetch sparingly.
+                    # For .BA, it's usually ARS unless it's a D ticker (e.g. AL30D.BA)
+                    # We can check the suffix for 'D.BA' or 'C.BA' but reliable way is `stock.info['currency']`
+                    # Optimization: assume ARS unless confirmed USD, or check suffix.
+                    
+                    # Heuristic: if ticker ends in D.BA or C.BA it might be USD, but let's try to get info if possible
+                    # or just default to ARS for standard logic and rely on MEP conversion.
+                    # User mentioned "SPYD", likely they map Ticker "SPYD" to source BYMA -> "SPYD.BA".
+                    
+                    # Using fast_info if available (newer yfinance)
+                    try:
+                        curr = stock.fast_info.currency
+                        if curr:
+                            currency = curr
+                        else:
+                            currency = "ARS" 
+                    except:
+                        # Fallback
+                        currency = "ARS"
+                        
+            except Exception as e:
+                print(f"YFinance error for {symbol}: {e}")
+                
+    except Exception as e:
+        print(f"Error fetching {ticker} from {source}: {e}")
+        
+    return price, currency
 
 def get_secret(key):
     """Safely get a secret from st.secrets to avoid StreamlitSecretNotFoundError"""
@@ -360,7 +422,7 @@ def main():
                 column_config={
                     "Ticker": st.column_config.TextColumn(disabled=True),
                     "Data Source": st.column_config.SelectboxColumn(
-                        options=["Manual", "Binance API", "Stock API"],
+                        options=["Manual", "Binance API", "Argentina (BYMA)", "Stock API"],
                         required=True
                     )
                 },
