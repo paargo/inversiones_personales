@@ -1,0 +1,16 @@
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Streamlit
+.streamlit/
+*.csv
+settings.json
+
+# Environment
+.env
+.venv
+env/
+venv/
