@@ -81,10 +81,21 @@ def load_data():
 def save_data(df):
     sh = get_db_connection()
     ws_inv, _ = init_worksheets(sh)
+    
+    # Prepare data for saving
+    df_tosave = df.copy()
+    
+    # Convert Date objects to string (JSON serializable)
+    if "Date" in df_tosave.columns:
+        df_tosave["Date"] = df_tosave["Date"].astype(str)
+        
+    # Handle NaN/None (replace with empty string or 0)
+    df_tosave = df_tosave.fillna("")
+
     # Clear and rewrite (simple but inefficient for huge data, fine for personal app)
     ws_inv.clear()
-    ws_inv.append_row(df.columns.tolist())
-    ws_inv.append_rows(df.values.tolist())
+    ws_inv.append_row(df_tosave.columns.tolist())
+    ws_inv.append_rows(df_tosave.values.tolist())
 
 def load_settings():
     # 1. API Keys -> Load from st.secrets (Read-only security)
@@ -298,6 +309,13 @@ def main():
 
     elif choice == "Dashboard":
         st.subheader("Holdings Dashboard")
+        
+        # 1. Fetch and Display FX Rates
+        dolar_rates = get_dolar_rates()
+        col_mep, col_ccl = st.columns(2)
+        col_mep.metric("Dólar MEP", f"${dolar_rates['MEP']:,.2f}")
+        col_ccl.metric("Dólar CCL", f"${dolar_rates['CCL']:,.2f}")
+        
         df = load_data()
 
         if not df.empty:
@@ -313,23 +331,50 @@ def main():
             # Helper to get current price (logic: if Binance API, fetch; else 0)
             if "Current Price (USD)" not in st.session_state:
                  st.session_state["Current Price (USD)"] = {}
+            if "Native Price" not in st.session_state:
+                 st.session_state["Native Price"] = {} # Store {Ticker: {Price: 100, Currency: ARS}}
 
             # Button to update prices
-            if st.button("🔄 Update Live Prices (Binance)"):
-                with st.spinner("Fetching prices from Binance..."):
+            if st.button("🔄 Update Live Prices"):
+                with st.spinner("Fetching prices..."):
+                    mep_rate = dolar_rates.get("MEP", 0.0)
+                    
                     for index, row in grouped_df.iterrows():
                         ticker = row["Ticker"]
                         source = ticker_config.get(ticker, "Manual")
                         
-                        if source == "Binance API":
-                            price = get_binance_price(ticker)
+                        if source != "Manual":
+                            price, currency = get_market_price(ticker, source)
+                            
                             if price > 0:
-                                st.session_state["Current Price (USD)"][ticker] = price
+                                # Store Native Info
+                                st.session_state["Native Price"][ticker] = {"price": price, "currency": currency}
+                                
+                                # Convert to USD for Total
+                                price_usd = 0.0
+                                if currency == "USD" or currency == "USDT":
+                                    price_usd = price
+                                elif currency == "ARS" and mep_rate > 0:
+                                    price_usd = price / mep_rate
+                                else:
+                                    price_usd = 0.0 # Unknown conversion
+                                
+                                st.session_state["Current Price (USD)"][ticker] = price_usd
+
                     st.success("Prices updated!")
 
-            # Apply prices from session state or default to 0
+            # Apply prices from session state
             # We map the session state prices to the dataframe
             grouped_df["Current Price (USD)"] = grouped_df["Ticker"].map(st.session_state["Current Price (USD)"]).fillna(0.0)
+            
+            # Enrich with Native Price info for display
+            def get_native_display(ticker):
+                data = st.session_state.get("Native Price", {}).get(ticker)
+                if data:
+                    return f"{data['price']:,.2f} {data['currency']}"
+                return "-"
+            
+            grouped_df["Live Price (Native)"] = grouped_df["Ticker"].apply(get_native_display)
 
             st.markdown("Enter or view current prices below:")
             
@@ -341,7 +386,8 @@ def main():
                     "Quantity": st.column_config.NumberColumn(disabled=True, format="%.6f"),
                     "Total_Cost": st.column_config.NumberColumn("Total Cost Basis", disabled=True, format="%.2f"),
                     "Avg Buy Price": st.column_config.NumberColumn(disabled=True, format="%.2f"),
-                    "Current Price (USD)": st.column_config.NumberColumn(min_value=0.0, format="%.6f", required=True)
+                    "Live Price (Native)": st.column_config.TextColumn("Live Price (Source)", disabled=True),
+                    "Current Price (USD)": st.column_config.NumberColumn(min_value=0.0, format="%.6f", required=True, help="Used for Portfolio Total. Calculated from Native Price / MEP if ARS.")
                 },
                 hide_index=True,
                 use_container_width=True
