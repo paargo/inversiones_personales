@@ -3,221 +3,10 @@ import pandas as pd
 import datetime
 import os
 
-import json
-import requests
-
-import json
-import requests
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-import yfinance as yf
-
-# Configuration
-# DATA_FILE = "investments.csv" # Deprecated
-# SETTINGS_FILE = "settings.json" # Deprecated
-
-SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-
-def get_db_connection():
-    """Connect to Google Sheets using st.secrets or local credentials.json"""
-    try:
-        # Check if running on Streamlit Cloud (or if secrets are set locally in .streamlit/secrets.toml)
-        creds_dict = get_secret("gcp_service_account")
-        if creds_dict:
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-        else:
-            # Fallback to local file for development
-            creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", SCOPE)
-        
-        client = gspread.authorize(creds)
-        
-        # Open the spreadsheet (assumes user named it "Investment Tracker Data")
-        # You can also config the sheet name in secrets
-        sheet_name = get_secret("sheet_name") or "Investment Tracker Data"
-            
-        sh = client.open(sheet_name)
-        return sh
-    except Exception as e:
-        st.error(f"Database Connection Error: {e}")
-        st.stop()
-
-def init_worksheets(sh):
-    """Ensure required worksheets exist"""
-    try:
-        # Investments Sheet
-        try:
-            ws_inv = sh.worksheet("Investments")
-        except gspread.WorksheetNotFound:
-            ws_inv = sh.add_worksheet(title="Investments", rows=1000, cols=20)
-            ws_inv.append_row([
-                "Date", "Ticker", "Platform", "Quantity", "Price", 
-                "Currency", "Commission", "Commission_Type", "Total_Cost"
-            ])
-
-        # Settings Sheet (Ticker Config)
-        try:
-            ws_settings = sh.worksheet("Settings")
-        except gspread.WorksheetNotFound:
-            ws_settings = sh.add_worksheet(title="Settings", rows=100, cols=5)
-            ws_settings.append_row(["Ticker", "Data Source"])
-
-        return ws_inv, ws_settings
-    except Exception as e:
-        st.error(f"Sheet Initialization Error: {e}")
-        st.stop()
-
-def load_data():
-    sh = get_db_connection()
-    ws_inv, _ = init_worksheets(sh)
-    data = ws_inv.get_all_records()
-    if data:
-        return pd.DataFrame(data)
-    else:
-        return pd.DataFrame(columns=[
-            "Date", "Ticker", "Platform", "Quantity", "Price", 
-            "Currency", "Commission", "Commission_Type", "Total_Cost"
-        ])
-
-def save_data(df):
-    sh = get_db_connection()
-    ws_inv, _ = init_worksheets(sh)
-    
-    # Prepare data for saving
-    df_tosave = df.copy()
-    
-    # Convert Date objects to string (JSON serializable)
-    if "Date" in df_tosave.columns:
-        df_tosave["Date"] = df_tosave["Date"].astype(str)
-        
-    # Handle NaN/None (replace with empty string or 0)
-    df_tosave = df_tosave.fillna("")
-
-    # Clear and rewrite (simple but inefficient for huge data, fine for personal app)
-    ws_inv.clear()
-    ws_inv.append_row(df_tosave.columns.tolist())
-    ws_inv.append_rows(df_tosave.values.tolist())
-
-def load_settings():
-    # 1. API Keys -> Load from st.secrets (Read-only security)
-    # 2. Ticker Config -> Load from GSheet "Settings" tab
-    
-    settings = {"api_keys": {}, "ticker_config": {}}
-    
-    # Load API Keys from Secrets
-    api_keys = get_secret("api_keys")
-    if api_keys:
-        settings["api_keys"] = api_keys
-    
-    # Load Ticker Config from Sheet
-    sh = get_db_connection()
-    _, ws_settings = init_worksheets(sh)
-    records = ws_settings.get_all_records()
-    
-    config = {}
-    for r in records:
-        if r["Ticker"]:
-            config[r["Ticker"]] = r["Data Source"]
-    settings["ticker_config"] = config
-    
-    return settings
-
-def save_settings(settings):
-    # Only saves Ticker Config to Sheet. API keys must be managed in secrets.toml/cloud dashboard.
-    sh = get_db_connection()
-    _, ws_settings = init_worksheets(sh)
-    
-    # Prepare dataframe
-    config_data = []
-    for ticker, source in settings.get("ticker_config", {}).items():
-        config_data.append({"Ticker": ticker, "Data Source": source})
-    
-    df_config = pd.DataFrame(config_data)
-    
-    ws_settings.clear()
-    ws_settings.append_row(["Ticker", "Data Source"])
-    if not df_config.empty:
-        ws_settings.append_rows(df_config.values.tolist())
-
-def get_dolar_rates():
-    """Fetch MEP and CCL rates from dolarapi.com"""
-    rates = {"MEP": 0.0, "CCL": 0.0}
-    try:
-        # Fetch MEP
-        resp_mep = requests.get("https://dolarapi.com/v1/dolares/bolsa", timeout=5)
-        if resp_mep.status_code == 200:
-            rates["MEP"] = resp_mep.json().get("venta", 0.0)
-            
-        # Fetch CCL
-        resp_ccl = requests.get("https://dolarapi.com/v1/dolares/contadoconliqui", timeout=5)
-        if resp_ccl.status_code == 200:
-            rates["CCL"] = resp_ccl.json().get("venta", 0.0)
-            
-    except Exception as e:
-        print(f"Error fetching FX rates: {e}")
-    return rates
-
-def get_market_price(ticker, source):
-    """
-    Fetch current price from specified source.
-    Returns: (price, currency)
-    """
-    price = 0.0
-    currency = "USD" # Default
-    
-    try:
-        if source == "Binance API":
-            symbol = f"{ticker}USDT"
-            url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
-            response = requests.get(url, timeout=5)
-            data = response.json()
-            if "price" in data:
-                price = float(data["price"])
-                currency = "USD"
-                
-        elif source == "Argentina (BYMA)":
-            # Append .BA if not present
-            symbol = ticker if ticker.endswith(".BA") else f"{ticker}.BA"
-            try:
-                stock = yf.Ticker(symbol)
-                # Fast fetch using history
-                hist = stock.history(period="1d")
-                if not hist.empty:
-                    price = hist["Close"].iloc[-1]
-                    # Try to detect currency from metadata, default to ARS for BYMA
-                    # yfinance info is sometimes slow, so we can infer or fetch sparingly.
-                    # For .BA, it's usually ARS unless it's a D ticker (e.g. AL30D.BA)
-                    # We can check the suffix for 'D.BA' or 'C.BA' but reliable way is `stock.info['currency']`
-                    # Optimization: assume ARS unless confirmed USD, or check suffix.
-                    
-                    # Heuristic: if ticker ends in D.BA or C.BA it might be USD, but let's try to get info if possible
-                    # or just default to ARS for standard logic and rely on MEP conversion.
-                    # User mentioned "SPYD", likely they map Ticker "SPYD" to source BYMA -> "SPYD.BA".
-                    
-                    # Using fast_info if available (newer yfinance)
-                    try:
-                        curr = stock.fast_info.currency
-                        if curr:
-                            currency = curr
-                        else:
-                            currency = "ARS" 
-                    except:
-                        # Fallback
-                        currency = "ARS"
-                        
-            except Exception as e:
-                print(f"YFinance error for {symbol}: {e}")
-                
-    except Exception as e:
-        print(f"Error fetching {ticker} from {source}: {e}")
-        
-    return price, currency
-
-def get_secret(key):
-    """Safely get a secret from st.secrets to avoid StreamlitSecretNotFoundError"""
-    try:
-        return st.secrets.get(key)
-    except Exception:
-        return None
+# Custom Modules
+import utils
+import database as db
+import market_data as md
 
 def main():
     st.set_page_config(page_title="Investment Tracker", layout="centered")
@@ -225,7 +14,7 @@ def main():
 
     # Sidebar: connection status check
     # Check if credentials.json exists OR if we have secrets configured
-    gcp_secret = get_secret("gcp_service_account")
+    gcp_secret = utils.get_secret("gcp_service_account")
     
     if not gcp_secret and not os.path.exists("credentials.json"):
         st.error("⚠️ No Google Cloud Connection found.")
@@ -252,8 +41,12 @@ def main():
                 min_buy = st.selectbox("Purchase Currency", ["USD", "EUR", "ARS", "USDT"])
 
             with col2:
-                quantity = st.number_input("Quantity", min_value=0.0, format="%.6f")
-                price = st.number_input("Reference Price (per unit)", min_value=0.0, format="%.2f")
+                quantity_input = st.text_input("Quantity", value="0.0")
+                price_input = st.text_input("Reference Price (per unit)", value="0.0")
+                
+                # Parse inputs
+                quantity = utils.safe_float(quantity_input)
+                price = utils.safe_float(price_input)
                 
             st.markdown("---")
             st.markdown("**Commission Details**")
@@ -261,7 +54,8 @@ def main():
             with col3:
                 commission_type = st.radio("Commission Type", ["Amount", "Percentage"], horizontal=True)
             with col4:
-                commission_value = st.number_input("Commission Value", min_value=0.0, format="%.2f")
+                commission_input = st.text_input("Commission Value", value="0.0")
+                commission_value = utils.safe_float(commission_input)
 
             # Calculate total for display (approximate, real calc on submit)
             total_preview = 0.0
@@ -302,28 +96,28 @@ def main():
                         "Total_Cost": total_cost
                     }
 
-                    df = load_data()
+                    df = db.load_data()
                     df = pd.concat([df, pd.DataFrame([new_entry])], ignore_index=True)
-                    save_data(df)
+                    db.save_data(df)
                     st.success(f"Saved: {quantity} {ticker} for {total_cost:,.2f} {min_buy}")
 
     elif choice == "Dashboard":
         st.subheader("Holdings Dashboard")
         
         # 1. Fetch and Display FX Rates
-        dolar_rates = get_dolar_rates()
+        dolar_rates = md.get_dolar_rates()
         col_mep, col_ccl = st.columns(2)
         col_mep.metric("Dólar MEP", f"${dolar_rates['MEP']:,.2f}")
         col_ccl.metric("Dólar CCL", f"${dolar_rates['CCL']:,.2f}")
         
-        df = load_data()
+        df = db.load_data()
 
         if not df.empty:
             # Group by Platform and Ticker
             grouped_df = df.groupby(["Platform", "Ticker"])[["Quantity", "Total_Cost"]].sum().reset_index()
 
             # Load settings for ticker source
-            settings = load_settings()
+            settings = db.load_settings()
             ticker_config = settings.get("ticker_config", {})
 
             grouped_df["Avg Buy Price"] = grouped_df["Total_Cost"] / grouped_df["Quantity"]
@@ -344,7 +138,7 @@ def main():
                         source = ticker_config.get(ticker, "Manual")
                         
                         if source != "Manual":
-                            price, currency = get_market_price(ticker, source)
+                            price, currency = md.get_market_price(ticker, source)
                             
                             if price > 0:
                                 # Store Native Info
@@ -414,7 +208,7 @@ def main():
 
     elif choice == "Settings":
         st.subheader("⚙️ Configuration")
-        settings = load_settings()
+        settings = db.load_settings()
         
         # 1. API Integration Settings
         st.markdown("### API Integration")
@@ -447,7 +241,7 @@ def main():
         st.markdown("### Ticker Configuration")
         st.markdown("Select where to fetch data for each asset.")
         
-        df = load_data()
+        df = db.load_data()
         if not df.empty:
             unique_tickers = df["Ticker"].unique()
             
@@ -483,7 +277,7 @@ def main():
                     new_config[row["Ticker"]] = row["Data Source"]
                 
                 settings["ticker_config"] = new_config
-                save_settings(settings)
+                db.save_settings(settings)
                 st.success("Ticker configuration saved!")
         else:
             st.info("Add investments first to configure tickers.")
