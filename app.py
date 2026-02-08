@@ -6,13 +6,71 @@ import os
 import json
 import requests
 
+import json
+import requests
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
 # Configuration
-DATA_FILE = "investments.csv"
-SETTINGS_FILE = "settings.json"
+# DATA_FILE = "investments.csv" # Deprecated
+# SETTINGS_FILE = "settings.json" # Deprecated
+
+SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+
+def get_db_connection():
+    """Connect to Google Sheets using st.secrets or local credentials.json"""
+    try:
+        # Check if running on Streamlit Cloud (or if secrets are set locally in .streamlit/secrets.toml)
+        creds_dict = get_secret("gcp_service_account")
+        if creds_dict:
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
+        else:
+            # Fallback to local file for development
+            creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", SCOPE)
+        
+        client = gspread.authorize(creds)
+        
+        # Open the spreadsheet (assumes user named it "Investment Tracker Data")
+        # You can also config the sheet name in secrets
+        sheet_name = get_secret("sheet_name") or "Investment Tracker Data"
+            
+        sh = client.open(sheet_name)
+        return sh
+    except Exception as e:
+        st.error(f"Database Connection Error: {e}")
+        st.stop()
+
+def init_worksheets(sh):
+    """Ensure required worksheets exist"""
+    try:
+        # Investments Sheet
+        try:
+            ws_inv = sh.worksheet("Investments")
+        except gspread.WorksheetNotFound:
+            ws_inv = sh.add_worksheet(title="Investments", rows=1000, cols=20)
+            ws_inv.append_row([
+                "Date", "Ticker", "Platform", "Quantity", "Price", 
+                "Currency", "Commission", "Commission_Type", "Total_Cost"
+            ])
+
+        # Settings Sheet (Ticker Config)
+        try:
+            ws_settings = sh.worksheet("Settings")
+        except gspread.WorksheetNotFound:
+            ws_settings = sh.add_worksheet(title="Settings", rows=100, cols=5)
+            ws_settings.append_row(["Ticker", "Data Source"])
+
+        return ws_inv, ws_settings
+    except Exception as e:
+        st.error(f"Sheet Initialization Error: {e}")
+        st.stop()
 
 def load_data():
-    if os.path.exists(DATA_FILE):
-        return pd.read_csv(DATA_FILE)
+    sh = get_db_connection()
+    ws_inv, _ = init_worksheets(sh)
+    data = ws_inv.get_all_records()
+    if data:
+        return pd.DataFrame(data)
     else:
         return pd.DataFrame(columns=[
             "Date", "Ticker", "Platform", "Quantity", "Price", 
@@ -20,18 +78,53 @@ def load_data():
         ])
 
 def save_data(df):
-    df.to_csv(DATA_FILE, index=False)
+    sh = get_db_connection()
+    ws_inv, _ = init_worksheets(sh)
+    # Clear and rewrite (simple but inefficient for huge data, fine for personal app)
+    ws_inv.clear()
+    ws_inv.append_row(df.columns.tolist())
+    ws_inv.append_rows(df.values.tolist())
 
 def load_settings():
-    if os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, "r") as f:
-            return json.load(f)
-    else:
-        return {"api_keys": {}, "ticker_config": {}}
+    # 1. API Keys -> Load from st.secrets (Read-only security)
+    # 2. Ticker Config -> Load from GSheet "Settings" tab
+    
+    settings = {"api_keys": {}, "ticker_config": {}}
+    
+    # Load API Keys from Secrets
+    api_keys = get_secret("api_keys")
+    if api_keys:
+        settings["api_keys"] = api_keys
+    
+    # Load Ticker Config from Sheet
+    sh = get_db_connection()
+    _, ws_settings = init_worksheets(sh)
+    records = ws_settings.get_all_records()
+    
+    config = {}
+    for r in records:
+        if r["Ticker"]:
+            config[r["Ticker"]] = r["Data Source"]
+    settings["ticker_config"] = config
+    
+    return settings
 
 def save_settings(settings):
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(settings, f, indent=4)
+    # Only saves Ticker Config to Sheet. API keys must be managed in secrets.toml/cloud dashboard.
+    sh = get_db_connection()
+    _, ws_settings = init_worksheets(sh)
+    
+    # Prepare dataframe
+    config_data = []
+    for ticker, source in settings.get("ticker_config", {}).items():
+        config_data.append({"Ticker": ticker, "Data Source": source})
+    
+    df_config = pd.DataFrame(config_data)
+    
+    ws_settings.clear()
+    ws_settings.append_row(["Ticker", "Data Source"])
+    if not df_config.empty:
+        ws_settings.append_rows(df_config.values.tolist())
 
 def get_binance_price(ticker):
     """Fetch current price for Ticker/USDT from Binance Public API"""
@@ -46,13 +139,32 @@ def get_binance_price(ticker):
         print(f"Error fetching {ticker}: {e}")
     return 0.0
 
+def get_secret(key):
+    """Safely get a secret from st.secrets to avoid StreamlitSecretNotFoundError"""
+    try:
+        return st.secrets.get(key)
+    except Exception:
+        return None
+
 def main():
     st.set_page_config(page_title="Investment Tracker", layout="centered")
     st.title("💰 Investment Tracker")
 
+    # Sidebar: connection status check
+    # Check if credentials.json exists OR if we have secrets configured
+    gcp_secret = get_secret("gcp_service_account")
+    
+    if not gcp_secret and not os.path.exists("credentials.json"):
+        st.error("⚠️ No Google Cloud Connection found.")
+        st.info("Please follow the setup guide to add `credentials.json` locally or configure `gcp_service_account` in Streamlit Secrets.")
+        with st.expander("Creating Credentials.json"):
+             st.markdown("1. Go to Google Cloud Console.\n2. Create Service Account & Key.\n3. Save as `credentials.json` in this folder.")
+        st.stop()
+
     st.sidebar.title("Navigation")
     menu = ["New Entry", "Dashboard", "Settings"]
     choice = st.sidebar.radio("Go to", menu)
+
 
     if choice == "New Entry":
         st.subheader("Add New Investment")
@@ -198,23 +310,28 @@ def main():
         
         # 1. API Integration Settings
         st.markdown("### API Integration")
-        with st.form("api_settings"):
-            st.markdown("**Crypto (Binance)**")
-            binance_key = st.text_input("API Key", value=settings.get("api_keys", {}).get("binance_key", ""), type="password")
-            binance_secret = st.text_input("API Secret", value=settings.get("api_keys", {}).get("binance_secret", ""), type="password")
+        st.info("API Keys are now managed via Streamlit Secrets for security.")
+        
+        with st.expander("How to configure API Keys"):
+            st.markdown("""
+            **Locally:**
+            Create a file `.streamlit/secrets.toml` with:
+            ```toml
+            [api_keys]
+            binance_key = "YOUR_KEY"
+            binance_secret = "YOUR_SECRET"
+            stock_key = "YOUR_KEY"
+            ```
             
-            st.markdown("**Stock Market Data**")
-            stock_key = st.text_input("API Key (e.g. AlphaVantage/Yahoo)", value=settings.get("api_keys", {}).get("stock_key", ""), type="password")
-            
-            save_api = st.form_submit_button("Save API Keys")
-            if save_api:
-                if "api_keys" not in settings:
-                    settings["api_keys"] = {}
-                settings["api_keys"]["binance_key"] = binance_key
-                settings["api_keys"]["binance_secret"] = binance_secret
-                settings["api_keys"]["stock_key"] = stock_key
-                save_settings(settings)
-                st.success("API Keys saved successfully!")
+            **Streamlit Cloud:**
+            Go to App Settings -> Secrets and paste the same content.
+            """)
+
+        # Display current status (masked)
+        api_keys = settings.get("api_keys", {})
+        st.text_input("Binance Key", value="********" if api_keys.get("binance_key") else "", disabled=True)
+        st.text_input("Binance Secret", value="********" if api_keys.get("binance_secret") else "", disabled=True)
+
 
         st.divider()
 

@@ -14,3 +14,4 @@ settings.json
 .venv
 env/
 venv/
+credentials.json
