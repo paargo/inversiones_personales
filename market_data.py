@@ -1,5 +1,6 @@
 import requests
 import yfinance as yf
+import pandas as pd
 
 def get_dolar_rates():
     """Fetch MEP and CCL rates from dolarapi.com"""
@@ -80,3 +81,29 @@ def get_market_price(ticker, source):
         print(f"Error fetching {ticker} from {source}: {e}")
         
     return price, currency
+
+def get_historical_prices(tickers_with_sources, start_date):
+    """
+    Fetch historical prices for a list of tickers from yfinance.
+    """
+    all_data = pd.DataFrame()
+    
+    for ticker, source in tickers_with_sources.items():
+        try:
+            if source == "Binance API" or source == "Manual" or source == "Stock API":
+                yf_ticker = f"{ticker}-USD"
+            elif source == "Argentina (BYMA)":
+                yf_ticker = ticker if ticker.endswith(".BA") else f"{ticker}.BA"
+            elif ticker == "ARS_USD":
+                yf_ticker = "ARS=X" # Correct Yahoo ticker for ARS/USD
+            else:
+                yf_ticker = ticker
+                
+            data = yf.download(yf_ticker, start=start_date, progress=False)
+            if not data.empty:
+                # Forward fill and then back fill to handle any gaps
+                all_data[ticker] = data["Close"].ffill().bfill()
+        except Exception as e:
+            print(f"Error fetching historical for {ticker}: {e}")
+            
+    return all_data

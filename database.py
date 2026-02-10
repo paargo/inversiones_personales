@@ -39,7 +39,7 @@ def init_worksheets(sh):
             ws_inv = sh.add_worksheet(title="Investments", rows=1000, cols=20)
             ws_inv.append_row([
                 "Date", "Ticker", "Platform", "Quantity", "Price", 
-                "Currency", "Commission", "Commission_Type", "Total_Cost"
+                "Currency", "Commission", "Commission_Type", "Commission_Currency", "Total_Cost"
             ])
 
         # Settings Sheet (Ticker Config)
@@ -62,6 +62,13 @@ def load_data():
     data = ws_inv.get_all_records(value_render_option='UNFORMATTED_VALUE')
     if data:
         df = pd.DataFrame(data)
+        # Ensure all expected columns exist
+        expected_cols = ["Date", "Ticker", "Platform", "Quantity", "Price", 
+                         "Currency", "Commission", "Commission_Type", "Commission_Currency", "Total_Cost"]
+        for col in expected_cols:
+            if col not in df.columns:
+                df[col] = "" # Default to empty string for missing cols
+        
         # Enforce numeric types using safe_float
         numeric_cols = ["Quantity", "Price", "Commission", "Total_Cost"]
         for col in numeric_cols:
@@ -71,7 +78,7 @@ def load_data():
     else:
         return pd.DataFrame(columns=[
             "Date", "Ticker", "Platform", "Quantity", "Price", 
-            "Currency", "Commission", "Commission_Type", "Total_Cost"
+            "Currency", "Commission", "Commission_Type", "Commission_Currency", "Total_Cost"
         ])
 
 def save_data(df):
