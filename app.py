@@ -30,13 +30,17 @@ def main():
 
     if choice == "New Entry":
         st.subheader("Add New Investment")
-
+        
+        # Load platforms for selection and commission logic
+        platforms_df = db.load_platforms()
+        platform_names = platforms_df["Platform"].tolist() if not platforms_df.empty else ["Manual"]
+        
         with st.form("entry_form"):
             col1, col2 = st.columns(2)
             
             with col1:
                 ticker = st.text_input("Ticker / Crypto Symbol").upper()
-                platform = st.selectbox("Platform", ["Binance", "Interactive Brokers", "Coinbase", "Kraken", "Other"])
+                platform = st.selectbox("Platform", platform_names)
                 date = st.date_input("Date", datetime.date.today())
                 min_buy = st.selectbox("Purchase Currency", ["USD", "EUR", "ARS", "USDT"])
 
@@ -48,32 +52,31 @@ def main():
                 quantity = utils.safe_float(quantity_input)
                 price = utils.safe_float(price_input)
                 
-            st.markdown("---")
-            st.markdown("**Commission Details**")
-            col3, col4, col5 = st.columns(3)
-            with col3:
-                commission_type = st.radio("Commission Type", ["Amount", "Percentage"], horizontal=True)
-            with col4:
-                commission_input = st.text_input("Commission Value", value="0.0", help="Supports up to 8 decimal places")
-                commission_value = utils.safe_float(commission_input)
-            with col5:
-                # Default to USD as requested
-                comm_currency = st.selectbox("Commission Currency", ["USD", "BTC"], index=0)
+            # Automation logic (look up platform)
+            comm_val = 0.0
+            comm_type = "Percentage"
+            comm_curr = "USD"
+            
+            if not platforms_df.empty and platform in platform_names:
+                plat_config = platforms_df[platforms_df["Platform"] == platform].iloc[0]
+                comm_val = plat_config["Entry Commission"]
+                comm_type = plat_config["Entry Type"]
+                comm_curr = plat_config["Commission Currency"]
 
             # Calculate total for display
             total_preview = 0.0
             if quantity and price:
                 base_cost = quantity * price
-                if commission_type == "Amount":
-                    if comm_currency == "BTC":
-                        comm_cost = commission_value * price
+                if comm_type == "Amount":
+                    if comm_curr == "BTC":
+                        comm_cost = comm_val * price
                     else:
-                        comm_cost = commission_value
+                        comm_cost = comm_val
                 else:
-                    # Percentage is usually relative to the trade value in the buy currency
-                    comm_cost = base_cost * (commission_value / 100)
+                    comm_cost = base_cost * (comm_val / 100)
                 total_preview = base_cost + comm_cost
 
+            st.markdown(f"**Commission:** {comm_val} {comm_type} ({comm_curr})")
             st.markdown(f"### Estimated Total: {min_buy} {total_preview:,.8f}" if total_preview < 1 else f"### Estimated Total: {min_buy} {total_preview:,.2f}")
 
             submitted = st.form_submit_button("Save Investment")
@@ -84,13 +87,13 @@ def main():
                 else:
                     # Final Calculation
                     base_cost = quantity * price
-                    if commission_type == "Amount":
-                        if comm_currency == "BTC":
-                            final_commission_val = commission_value * price
+                    if comm_type == "Amount":
+                        if comm_curr == "BTC":
+                            final_commission_val = comm_val * price
                         else:
-                            final_commission_val = commission_value
+                            final_commission_val = comm_val
                     else:
-                        final_commission_val = base_cost * (commission_value / 100)
+                        final_commission_val = base_cost * (comm_val / 100)
                     
                     total_cost = base_cost + final_commission_val
 
@@ -101,9 +104,9 @@ def main():
                         "Quantity": quantity,
                         "Price": price,
                         "Currency": min_buy,
-                        "Commission": commission_value, # Store the raw input value
-                        "Commission_Type": commission_type,
-                        "Commission_Currency": comm_currency,
+                        "Commission": comm_val, 
+                        "Commission_Type": comm_type,
+                        "Commission_Currency": comm_curr,
                         "Total_Cost": total_cost
                     }
 
@@ -492,13 +495,42 @@ def main():
 
         st.divider()
 
-        # 2. Ticker Configuration
+        # 2. Platform Configuration
+        st.markdown("### Platform Configuration")
+        st.markdown("Configure entry/exit commissions and currency per platform.")
+        
+        platforms_df = db.load_platforms()
+        
+        edited_platforms_df = st.data_editor(
+            platforms_df,
+            column_config={
+                "Platform": st.column_config.TextColumn(required=True),
+                "Entry Commission": st.column_config.NumberColumn(format="%.4f"),
+                "Entry Type": st.column_config.SelectboxColumn(options=["Percentage", "Amount"]),
+                "Exit Commission": st.column_config.NumberColumn(format="%.4f"),
+                "Exit Type": st.column_config.SelectboxColumn(options=["Percentage", "Amount"]),
+                "Commission Currency": st.column_config.SelectboxColumn(options=["USD", "BTC"])
+            },
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            key="platform_editor"
+        )
+        
+        if st.button("💾 Save Platform Settings"):
+            db.save_platforms(edited_platforms_df)
+            st.success("Platform settings saved!")
+            st.rerun()
+
+        st.divider()
+
+        # 3. Ticker Configuration
         st.markdown("### Ticker Configuration")
         st.markdown("Select where to fetch data for each asset.")
         
         df = db.load_data()
         if not df.empty:
-            unique_tickers = df["Ticker"].unique()
+            unique_tickers = sorted(df["Ticker"].unique())
             
             # Prepare data for editor
             ticker_config_data = []
@@ -523,19 +555,20 @@ def main():
                 },
                 hide_index=True,
                 use_container_width=True,
-                key="ticker_editor"
+                key="ticker_editor_v2"
             )
             
-            if st.button("Save Ticker Configuration"):
+            if st.button("💾 Save Ticker Settings"):
                 new_config = {}
-                for index, row in edited_ticker_df.iterrows():
+                for _, row in edited_ticker_df.iterrows():
                     new_config[row["Ticker"]] = row["Data Source"]
                 
                 settings["ticker_config"] = new_config
                 db.save_settings(settings)
-                st.success("Ticker configuration saved!")
+                st.success("Ticker settings saved!")
+                st.rerun()
         else:
-            st.info("Add investments first to configure tickers.")
+            st.info("No tickers found yet. Add some investments first.")
 
 
 if __name__ == "__main__":

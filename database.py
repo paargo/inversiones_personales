@@ -42,6 +42,22 @@ def init_worksheets(sh):
                 "Currency", "Commission", "Commission_Type", "Commission_Currency", "Total_Cost"
             ])
 
+        # Platforms Sheet
+        try:
+            ws_platforms = sh.worksheet("Platforms")
+        except gspread.WorksheetNotFound:
+            ws_platforms = sh.add_worksheet(title="Platforms", rows=100, cols=10)
+            ws_platforms.append_row([
+                "Platform", "Entry Commission", "Entry Type", 
+                "Exit Commission", "Exit Type", "Commission Currency"
+            ])
+            # Add some defaults
+            ws_platforms.append_rows([
+                ["Binance", 0.1, "Percentage", 0.1, "Percentage", "BTC"],
+                ["Interactive Brokers", 1.0, "Amount", 1.0, "Amount", "USD"],
+                ["Coinbase", 0.5, "Percentage", 0.5, "Percentage", "USD"]
+            ])
+
         # Settings Sheet (Ticker Config)
         try:
             ws_settings = sh.worksheet("Settings")
@@ -140,3 +156,29 @@ def save_settings(settings):
     ws_settings.append_row(["Ticker", "Data Source"])
     if not df_config.empty:
         ws_settings.append_rows(df_config.values.tolist())
+
+def load_platforms():
+    sh = get_db_connection()
+    try:
+        ws = sh.worksheet("Platforms")
+        records = ws.get_all_records()
+        if not records:
+             return pd.DataFrame(columns=["Platform", "Entry Commission", "Entry Type", "Exit Commission", "Exit Type", "Commission Currency"])
+        df = pd.DataFrame(records)
+        # Ensure numeric
+        for col in ["Entry Commission", "Exit Commission"]:
+            df[col] = df[col].apply(utils.safe_float)
+        return df
+    except:
+        return pd.DataFrame(columns=["Platform", "Entry Commission", "Entry Type", "Exit Commission", "Exit Type", "Commission Currency"])
+
+def save_platforms(df):
+    sh = get_db_connection()
+    try:
+        ws = sh.worksheet("Platforms")
+        ws.clear()
+        ws.append_row(df.columns.tolist())
+        if not df.empty:
+            ws.append_rows(df.values.tolist())
+    except Exception as e:
+        st.error(f"Error saving platforms: {e}")
