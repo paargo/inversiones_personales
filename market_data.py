@@ -31,14 +31,28 @@ def get_market_price(ticker, source):
         if source == "Binance API":
             symbol = f"{ticker}USDT"
             url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
             try:
-                response = requests.get(url, timeout=5)
+                response = requests.get(url, headers=headers, timeout=5)
+                response.raise_for_status() # Raise error for non-200 codes
                 data = response.json()
                 if "price" in data:
                     price = float(data["price"])
                     currency = "USD"
             except Exception as e:
-                 print(f"Binance API error: {e}")
+                print(f"Binance API error for {ticker}: {e}. Falling back to Yahoo Finance.")
+                try:
+                    # Fallback to Yahoo Finance (Crypto usually ends in -USD)
+                    yf_symbol = f"{ticker}-USD"
+                    stock = yf.Ticker(yf_symbol)
+                    hist = stock.history(period="1d")
+                    if not hist.empty:
+                        price = hist["Close"].iloc[-1]
+                        currency = "USD"
+                except Exception as yf_e:
+                    print(f"Yahoo Finance fallback error for {ticker}: {yf_e}")
 
         elif source == "Argentina (BYMA)":
             # Append .BA if not present
