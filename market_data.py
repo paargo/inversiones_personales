@@ -3,8 +3,8 @@ import yfinance as yf
 import pandas as pd
 
 def get_dolar_rates():
-    """Fetch MEP and CCL rates from dolarapi.com"""
-    rates = {"MEP": 0.0, "CCL": 0.0}
+    """Fetch MEP, CCL and Cripto rates from dolarapi.com + Variation proxy"""
+    rates = {"MEP": 0.0, "CCL": 0.0, "Cripto": 0.0, "variation": 0.0}
     try:
         # Fetch MEP
         resp_mep = requests.get("https://dolarapi.com/v1/dolares/bolsa", timeout=5)
@@ -16,16 +16,35 @@ def get_dolar_rates():
         if resp_ccl.status_code == 200:
             rates["CCL"] = resp_ccl.json().get("venta", 0.0)
             
+        # Fetch Cripto
+        resp_crypto = requests.get("https://dolarapi.com/v1/dolares/cripto", timeout=5)
+        if resp_crypto.status_code == 200:
+            rates["Cripto"] = resp_crypto.json().get("venta", 0.0)
+
+        # Proxy for dollar variation (ARS=X which is USD/ARS exchange rate)
+        try:
+            stock = yf.Ticker("ARS=X")
+            hist = stock.history(period="2d")
+            if len(hist) >= 2:
+                prev = hist["Close"].iloc[-2]
+                curr = hist["Close"].iloc[-1]
+                rates["variation"] = (curr / prev - 1)
+            elif not hist.empty:
+                rates["variation"] = 0.0
+        except:
+            pass
+            
     except Exception as e:
         print(f"Error fetching FX rates: {e}")
     return rates
 
 def get_market_price(ticker, source):
     """
-    Fetch current price from specified source.
-    Returns: (price, currency)
+    Fetch current price and previous close from specified source.
+    Returns: (price, currency, prev_close)
     """
     price = 0.0
+    prev_close = 0.0
     currency = "USD" # Default
     
     try:
@@ -37,35 +56,48 @@ def get_market_price(ticker, source):
             }
             try:
                 response = requests.get(url, headers=headers, timeout=5)
-                response.raise_for_status() # Raise error for non-200 codes
+                response.raise_for_status()
                 data = response.json()
                 if "price" in data:
                     price = float(data["price"])
-                    currency = "USD"
+                    
+                # For prev_close, we fallback to Yahoo since Binance ticker 24h is another call
+                yf_symbol = f"{ticker}-USD"
+                stock = yf.Ticker(yf_symbol)
+                hist = stock.history(period="2d")
+                if len(hist) >= 2:
+                    prev_close = hist["Close"].iloc[-2]
+                elif not hist.empty:
+                    prev_close = hist["Close"].iloc[0]
+                    
             except Exception as e:
                 print(f"Binance API error for {ticker}: {e}. Falling back to Yahoo Finance.")
                 try:
-                    # Fallback to Yahoo Finance (Crypto usually ends in -USD)
                     yf_symbol = f"{ticker}-USD"
                     stock = yf.Ticker(yf_symbol)
-                    hist = stock.history(period="1d")
+                    hist = stock.history(period="2d")
                     if not hist.empty:
                         price = hist["Close"].iloc[-1]
+                        if len(hist) >= 2:
+                            prev_close = hist["Close"].iloc[-2]
+                        else:
+                            prev_close = price
                         currency = "USD"
                 except Exception as yf_e:
                     print(f"Yahoo Finance fallback error for {ticker}: {yf_e}")
 
         elif source == "Argentina (BYMA)":
-            # Append .BA if not present
             symbol = ticker if ticker.endswith(".BA") else f"{ticker}.BA"
             try:
                 stock = yf.Ticker(symbol)
-                # Fast fetch using history
-                hist = stock.history(period="1d")
+                hist = stock.history(period="2d")
                 if not hist.empty:
                     price = hist["Close"].iloc[-1]
+                    if len(hist) >= 2:
+                        prev_close = hist["Close"].iloc[-2]
+                    else:
+                        prev_close = price
                     
-                    # Try to detect currency using fast_info
                     try:
                         curr = stock.fast_info.currency
                         if curr:
@@ -80,7 +112,7 @@ def get_market_price(ticker, source):
     except Exception as e:
         print(f"Error fetching {ticker} from {source}: {e}")
         
-    return price, currency
+    return price, currency, prev_close
 
 def get_historical_prices(tickers_with_sources, start_date):
     """

@@ -2,15 +2,52 @@ import streamlit as st
 import pandas as pd
 import datetime
 import os
+from streamlit_autorefresh import st_autorefresh
 
 # Custom Modules
 import utils
 import database as db
 import market_data as md
 
+# Configuration constants
+PRICE_UPDATE_INTERVAL_MINUTES = 30
+
 def main():
     st.set_page_config(page_title="Investment Tracker", layout="wide")
     st.title("💰 Investment Tracker")
+
+    # 1. Global Market Header (Visible on all pages)
+    dolar_rates = md.get_dolar_rates()
+    # Fetch BTC price for the header
+    btc_price, _, btc_prev_close = md.get_market_price("BTC", "Binance API")
+    
+    col_mep, col_ccl, col_crypto, col_btc = st.columns(4)
+    
+    # Helper for small variation capsules
+    def metric_capsule(variation):
+        color = "#28a745" if variation >= 0 else "#dc3545"
+        symbol = "▲" if variation >= 0 else "▼"
+        return f"""
+        <div style="background-color: {color}; color: white; padding: 2px 8px; border-radius: 10px; display: inline-block; font-size: 0.75em; margin-top: -10px;">
+            {symbol} {abs(variation):.2%}
+        </div>
+        """
+
+    col_mep.metric("Dólar MEP", f"${dolar_rates['MEP']:,.2f}")
+    col_mep.markdown(metric_capsule(dolar_rates.get("variation", 0.0)), unsafe_allow_html=True)
+    
+    col_ccl.metric("Dólar CCL", f"${dolar_rates['CCL']:,.2f}")
+    col_ccl.markdown(metric_capsule(dolar_rates.get("variation", 0.0)), unsafe_allow_html=True)
+    
+    col_crypto.metric("Dólar Cripto", f"${dolar_rates['Cripto']:,.2f}")
+    col_crypto.markdown(metric_capsule(dolar_rates.get("variation", 0.0)), unsafe_allow_html=True)
+    
+    col_btc.metric("BTC Price", f"${btc_price:,.2f}" if btc_price > 0 else "-")
+    if btc_price > 0 and btc_prev_close > 0:
+        btc_var = (btc_price / btc_prev_close - 1)
+        col_btc.markdown(metric_capsule(btc_var), unsafe_allow_html=True)
+    
+    st.divider()
 
     # Sidebar: connection status check
     # Check if credentials.json exists OR if we have secrets configured
@@ -31,15 +68,30 @@ def main():
     if choice == "New Entry":
         st.subheader("Add New Investment")
         
-        # Load platforms for selection and commission logic
+        # Load platforms and tickers for selection
         platforms_df = db.load_platforms()
         platform_names = platforms_df["Platform"].tolist() if not platforms_df.empty else ["Manual"]
         
+        settings = db.load_settings()
+        ticker_config = settings.get("ticker_config", {})
+        existing_tickers = sorted(list(ticker_config.keys()))
+        ticker_options = existing_tickers + ["➕ Add New Ticker..."]
+        
+        # Ticker selection (outside form for dynamic behavior)
+        selected_ticker_opt = st.selectbox("Ticker / Crypto Symbol", ticker_options)
+        
+        ticker = ""
+        if selected_ticker_opt == "➕ Add New Ticker...":
+            ticker = st.text_input("Enter New Ticker Symbol").upper()
+        else:
+            ticker = selected_ticker_opt
+
         with st.form("entry_form"):
             col1, col2 = st.columns(2)
             
             with col1:
-                ticker = st.text_input("Ticker / Crypto Symbol").upper()
+                # Ticker is already determined above
+                st.info(f"Selected Ticker: **{ticker if ticker else 'None'}**")
                 platform = st.selectbox("Platform", platform_names)
                 date = st.date_input("Date", datetime.date.today())
                 min_buy = st.selectbox("Purchase Currency", ["USD", "EUR", "ARS", "USDT"])
@@ -119,12 +171,6 @@ def main():
     elif choice == "Dashboard":
         st.subheader("Holdings Dashboard")
         
-        # 1. Fetch and Display FX Rates
-        dolar_rates = md.get_dolar_rates()
-        col_mep, col_ccl = st.columns(2)
-        col_mep.metric("Dólar MEP", f"${dolar_rates['MEP']:,.2f}")
-        col_ccl.metric("Dólar CCL", f"${dolar_rates['CCL']:,.2f}")
-        
         df = db.load_data()
 
         if not df.empty:
@@ -154,14 +200,29 @@ def main():
                  st.session_state["Current Price (USD)"] = {}
             if "Native Price" not in st.session_state:
                  st.session_state["Native Price"] = {} # Store {Ticker: {Price: 100, Currency: ARS}}
+            if "Prev Close Price (USD)" not in st.session_state:
+                 st.session_state["Prev Close Price (USD)"] = {}
+            if "last_update_time" not in st.session_state:
+                 st.session_state["last_update_time"] = None
 
-            # Auto-update logic
+            # 3. Auto-update logic
+            # Refresh the app every 1 minute to check for the update interval
+            st_autorefresh(interval=60 * 1000, key="price_update_refresh")
+
             should_update = st.button("🔄 Update Live Prices")
+            
+            # Check elapsed time for automatic update
+            if st.session_state["last_update_time"]:
+                elapsed_minutes = (datetime.datetime.now() - st.session_state["last_update_time"]).total_seconds() / 60
+                if elapsed_minutes >= PRICE_UPDATE_INTERVAL_MINUTES:
+                    should_update = True
+            
             if not st.session_state.get("prices_updated", False) and not grouped_df.empty:
                 should_update = True
 
             if should_update:
                 with st.spinner("Fetching prices..."):
+                    # ... (rest of the fetching logic)
                     mep_rate = dolar_rates.get("MEP", 0.0)
                     
                     for index, row in grouped_df.iterrows():
@@ -169,25 +230,34 @@ def main():
                         source = ticker_config.get(ticker, "Manual")
                         
                         if source != "Manual":
-                            price, currency = md.get_market_price(ticker, source)
+                            price, currency, prev_close = md.get_market_price(ticker, source)
                             
                             if price > 0:
                                 # Store Native Info
                                 st.session_state["Native Price"][ticker] = {"price": price, "currency": currency}
                                 
-                                # Convert to USD for Total
+                                # Convert current price to USD
                                 price_usd = 0.0
                                 if currency == "USD" or currency == "USDT":
                                     price_usd = price
                                 elif currency == "ARS" and mep_rate > 0:
                                     price_usd = price / mep_rate
-                                else:
-                                    price_usd = 0.0 # Unknown conversion
                                 
                                 st.session_state["Current Price (USD)"][ticker] = price_usd
 
+                                # Convert prev close to USD
+                                prev_close_usd = 0.0
+                                if prev_close > 0:
+                                    if currency in ["USD", "USDT"]:
+                                        prev_close_usd = prev_close
+                                    elif currency == "ARS" and mep_rate > 0:
+                                        prev_close_usd = prev_close / mep_rate
+                                
+                                st.session_state["Prev Close Price (USD)"][ticker] = prev_close_usd
+
                     st.session_state["prices_updated"] = True
-                    st.success("Prices updated!")
+                    st.session_state["last_update_time"] = datetime.datetime.now()
+                    st.success(f"Prices updated! (Next auto-update in {PRICE_UPDATE_INTERVAL_MINUTES} mins)")
 
             # Apply prices from session state
             # We map the session state prices to the dataframe
@@ -201,6 +271,16 @@ def main():
                 axis=1
             )
             
+            # Daily Variation Columns
+            grouped_df["Prev Close (USD)"] = grouped_df["Ticker"].map(st.session_state.get("Prev Close Price (USD)", {})).fillna(0.0)
+            grouped_df["Day Chg ($)"] = grouped_df["Quantity"] * (grouped_df["Current Price (USD)"] - grouped_df["Prev Close (USD)"])
+            grouped_df["Day Chg (%)"] = (grouped_df["Day Chg ($)"] / (grouped_df["Quantity"] * grouped_df["Prev Close (USD)"])) if not (grouped_df["Quantity"] * grouped_df["Prev Close (USD)"]).empty else 0.0
+            # Handle (%) calculation per row
+            grouped_df["Day Chg (%)"] = grouped_df.apply(
+                lambda row: (row["Day Chg ($)"] / (row["Quantity"] * row["Prev Close (USD)"])) if (row["Quantity"] * row["Prev Close (USD)"]) > 0 else 0.0,
+                axis=1
+            )
+            
             # Enrich with Native Price info for display
             def get_native_display(ticker):
                 data = st.session_state.get("Native Price", {}).get(ticker)
@@ -211,13 +291,22 @@ def main():
             grouped_df["Live Price (Native)"] = grouped_df["Ticker"].apply(get_native_display)
 
             # Filter columns to show for editing
-            edit_cols = ["Platform", "Ticker", "Quantity", "Total_Cost", "Avg Buy Price", "Current Price (USD)", "Updated Value (USD)", "Result ($)", "Result (%)"]
+            edit_cols = [
+                "Platform", "Ticker", "Quantity", "Total_Cost", "Avg Buy Price", 
+                "Current Price (USD)", "Updated Value (USD)", 
+                "Day Chg ($)", "Day Chg (%)",
+                "Result ($)", "Result (%)"
+            ]
             
             # Calculate Totals for the editor
             total_cost_editor = grouped_df["Total_Cost"].sum()
             total_value_editor = grouped_df["Updated Value (USD)"].sum()
             total_result_editor = grouped_df["Result ($)"].sum()
             total_result_pct_editor = (total_value_editor / total_cost_editor - 1) if total_cost_editor > 0 else 0
+            
+            total_day_chg_editor = grouped_df["Day Chg ($)"].sum()
+            total_day_prev_val = (grouped_df["Quantity"] * grouped_df["Prev Close (USD)"]).sum()
+            total_day_chg_pct_editor = (total_day_chg_editor / total_day_prev_val) if total_day_prev_val > 0 else 0
             
             total_row_editor = pd.DataFrame([{
                 "Platform": "TOTAL",
@@ -227,6 +316,8 @@ def main():
                 "Avg Buy Price": "",
                 "Current Price (USD)": "",
                 "Updated Value (USD)": f"{total_value_editor:,.2f}",
+                "Day Chg ($)": f"{total_day_chg_editor:+,.2f}",
+                "Day Chg (%)": f"{total_day_chg_pct_editor:+.2%}",
                 "Result ($)": f"{total_result_editor:+,.2f}",
                 "Result (%)": f"{total_result_pct_editor:+.2%}"
             }])
@@ -239,8 +330,10 @@ def main():
             df_for_editor = grouped_df[edit_cols].copy()
             # Format numeric columns as strings for the editor to match the TOTAL row style
             # but KEEP Current Price as numeric for editing
-            for col in ["Quantity", "Total_Cost", "Avg Buy Price", "Updated Value (USD)", "Result ($)"]:
-                df_for_editor[col] = df_for_editor[col].apply(lambda x: f"{x:,.6f}" if "Quantity" in col or "Price" in col else f"{x:,.2f}")
+            for col in ["Quantity", "Total_Cost", "Avg Buy Price", "Updated Value (USD)", "Day Chg ($)", "Result ($)"]:
+                df_for_editor[col] = df_for_editor[col].apply(lambda x: f"{x:,.6f}" if "Quantity" in col or "Price" in col else f"{x:+,.2f}" if "Chg" in col or "Result" in col else f"{x:,.2f}")
+            
+            df_for_editor["Day Chg (%)"] = df_for_editor["Day Chg (%)"].apply(lambda x: f"{x:+.2%}")
             
             df_for_editor = pd.concat([df_for_editor, total_row_editor], ignore_index=True)
 
@@ -254,6 +347,8 @@ def main():
                     "Avg Buy Price": st.column_config.TextColumn(disabled=True),
                     "Current Price (USD)": st.column_config.TextColumn(help="Edit prices in the asset rows. TOTAL row is read-only."),
                     "Updated Value (USD)": st.column_config.TextColumn(disabled=True),
+                    "Day Chg ($)": st.column_config.TextColumn(disabled=True),
+                    "Day Chg (%)": st.column_config.TextColumn(disabled=True),
                     "Result ($)": st.column_config.TextColumn(disabled=True),
                     "Result (%)": st.column_config.TextColumn(disabled=True)
                 },
@@ -288,13 +383,39 @@ def main():
                 for col in ["Quantity", "Total_Cost", "Avg Buy Price", "Current Price (USD)", "Updated Value (USD)", "Result ($)"]:
                     data_df[col] = data_df[col].apply(utils.safe_float)
                 
+                # Recalculate totals for display
                 total_value = data_df["Updated Value (USD)"].sum()
                 total_cost = data_df["Total_Cost"].sum()
                 total_result = data_df["Result ($)"].sum()
                 total_result_pct = (total_value / total_cost - 1) if total_cost > 0 else 0.0
-                
+
                 st.divider()
-                st.metric("Total Portfolio Value (USD)", f"${total_value:,.2f}", delta=f"${total_result:,.2f} ({total_result_pct:+.2%})")
+                
+                # Calculate Daily Delta
+                data_df["Prev Close (USD)"] = data_df["Ticker"].map(st.session_state.get("Prev Close Price (USD)", {})).fillna(0.0)
+                # If prev close is 0 (new asset or error), we use avg buy price or current price to avoid huge spikes?
+                # Actually, if we want "Daily Update", if we don't have yesterday's price, variation is 0 for that asset.
+                daily_change_usd = (data_df["Quantity"] * (data_df["Current Price (USD)"] - data_df["Prev Close (USD)"])).sum()
+                daily_change_pct = (daily_change_usd / (data_df["Quantity"] * data_df["Prev Close (USD)"]).sum()) if (data_df["Quantity"] * data_df["Prev Close (USD)"]).sum() > 0 else 0.0
+
+                # UI: Portfolio Header with Delta Capsule
+                col_title, col_delta = st.columns([3, 1])
+                with col_title:
+                    st.metric("Total Portfolio Value (USD)", f"${total_value:,.2f}", delta=f"${total_result:,.2f} ({total_result_pct:+.2%})")
+                
+                with col_delta:
+                    # Daily Variation "Capsule"
+                    color = "#28a745" if daily_change_usd >= 0 else "#dc3545"
+                    symbol = "▲" if daily_change_usd >= 0 else "▼"
+                    st.markdown(
+                        f"""
+                        <div style="background-color: {color}; color: white; padding: 10px 15px; border-radius: 20px; text-align: center; margin-top: 15px;">
+                            <span style="font-weight: bold; font-size: 0.9em;">DAILY UPDATE</span><br>
+                            <span style="font-size: 1.2em;">{symbol} ${abs(daily_change_usd):,.2f} ({daily_change_pct:+.2%})</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
                 
                 st.subheader("Detailed Breakdown")
                 
