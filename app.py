@@ -582,6 +582,36 @@ def main():
                     except Exception as e:
                         st.error(f"Error generating chart: {e}")
 
+                # --- NEW: Summary by Platform ---
+                st.divider()
+                st.subheader("📊 Resumen por Plataforma")
+                
+                # Use data_df which has the updated USD values
+                # data_df was prepared around line 380-384
+                if not data_df.empty:
+                    platform_summary = data_df.groupby("Platform")["Updated Value (USD)"].sum().reset_index()
+                    platform_summary.columns = ["Plataforma", "Valor en Dolares"]
+                    
+                    # Sort by value descending
+                    platform_summary = platform_summary.sort_values(by="Valor en Dolares", ascending=False)
+                    
+                    # Add Total Row
+                    total_val = platform_summary["Valor en Dolares"].sum()
+                    total_row = pd.DataFrame([{"Plataforma": "TOTAL", "Valor en Dolares": total_val}])
+                    platform_summary = pd.concat([platform_summary, total_row], ignore_index=True)
+
+                    # Format for display
+                    display_platform_summary = platform_summary.copy()
+                    display_platform_summary["Valor en Dolares"] = display_platform_summary["Valor en Dolares"].apply(lambda x: f"${x:,.2f}")
+                    
+                    st.dataframe(
+                        display_platform_summary,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else:
+                    st.info("No hay datos suficientes para mostrar el resumen por plataforma.")
+
         else:
             st.info("No investments found. Go to 'New Entry' to add some.")
 
