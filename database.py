@@ -26,7 +26,7 @@ def get_db_connection():
         sh = client.open(sheet_name)
         return sh
     except Exception as e:
-        st.error(f"Database Connection Error: {e}")
+        st.error(f"Error de conexión a la base de datos: {e}")
         st.stop()
 
 def init_worksheets(sh):
@@ -67,7 +67,7 @@ def init_worksheets(sh):
 
         return ws_inv, ws_settings
     except Exception as e:
-        st.error(f"Sheet Initialization Error: {e}")
+        st.error(f"Error de inicialización de hojas: {e}")
         st.stop()
 
 def load_data():
@@ -181,4 +181,4 @@ def save_platforms(df):
         if not df.empty:
             ws.append_rows(df.values.tolist())
     except Exception as e:
-        st.error(f"Error saving platforms: {e}")
+        st.error(f"Error al guardar plataformas: {e}")

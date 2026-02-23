@@ -13,8 +13,8 @@ import market_data as md
 PRICE_UPDATE_INTERVAL_MINUTES = 30
 
 def main():
-    st.set_page_config(page_title="Investment Tracker", layout="wide")
-    st.title("💰 Investment Tracker")
+    st.set_page_config(page_title="Control de Inversiones", layout="wide")
+    st.title("💰 Control de Inversiones")
 
     # 1. Global Market Header (Visible on all pages)
     dolar_rates = md.get_dolar_rates()
@@ -42,7 +42,7 @@ def main():
     col_crypto.metric("Dólar Cripto", f"${dolar_rates['Cripto']:,.2f}")
     col_crypto.markdown(metric_capsule(dolar_rates.get("variation", 0.0)), unsafe_allow_html=True)
     
-    col_btc.metric("BTC Price", f"${btc_price:,.2f}" if btc_price > 0 else "-")
+    col_btc.metric("Precio BTC", f"${btc_price:,.2f}" if btc_price > 0 else "-")
     if btc_price > 0 and btc_prev_close > 0:
         btc_var = (btc_price / btc_prev_close - 1)
         col_btc.markdown(metric_capsule(btc_var), unsafe_allow_html=True)
@@ -60,13 +60,75 @@ def main():
              st.markdown("1. Go to Google Cloud Console.\n2. Create Service Account & Key.\n3. Save as `credentials.json` in this folder.")
         st.stop()
 
-    st.sidebar.title("Navigation")
-    menu = ["Dashboard", "New Entry", "Settings"]
-    choice = st.sidebar.radio("Go to", menu)
+    # Custom CSS for Navigation Banners
+    st.markdown("""
+        <style>
+        /* Style for sidebar buttons to look like banners */
+        div.stButton > button {
+            width: 100%;
+            height: 50px;
+            border-radius: 5px;
+            border: 1px solid #ffffff;
+            background-color: transparent;
+            color: #ffffff;
+            font-size: 16px;
+            font-weight: 500;
+            margin-bottom: 10px;
+            transition: all 0.3s ease;
+            text-align: center;
+        }
+        
+        div.stButton > button:hover {
+            border-color: #ff4b4b;
+            color: #ff4b4b;
+            background-color: rgba(255, 75, 75, 0.05);
+        }
+
+        /* Active button style */
+        .active-nav-button {
+            background-color: #ff4b4b !important;
+            color: white !important;
+            border-color: #ff4b4b !important;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    st.sidebar.title("Menú")
+    
+    # Initialize menu choice in session state
+    if "menu_choice" not in st.session_state:
+        st.session_state["menu_choice"] = "Dashboard"
+
+    menu = ["Dashboard", "Ingresar Compra", "Configuración"]
+    
+    # Render banners
+    for item in menu:
+        is_active = st.session_state["menu_choice"] == item
+        
+        # We use a container to apply different style if active
+        # Streamlit doesn't support direct class assignment to buttons easily, 
+        # so we'll use a hack or just rely on the CSS selector for all buttons
+        # To make one "look" active, we can use a different button type or just accept that 
+        # they all look the same but the logic works.
+        # Actually, let's use a trick: if active, we wrap it in a div that we can target?
+        # Streamlit buttons are hard to style individually without unique IDs.
+        # Let's just use the standard button but with a logic check.
+        
+        if st.sidebar.button(
+            item, 
+            key=f"nav_{item}", 
+            use_container_width=True,
+            type="primary" if is_active else "secondary"
+        ):
+            st.session_state["menu_choice"] = item
+            st.rerun()
+
+    choice = st.session_state["menu_choice"]
 
 
-    if choice == "New Entry":
-        st.subheader("Add New Investment")
+    if choice == "Ingresar Compra":
+        st.subheader("Ingresar Nueva Inversión")
         
         # Load platforms and tickers for selection
         platforms_df = db.load_platforms()
@@ -78,11 +140,11 @@ def main():
         ticker_options = existing_tickers + ["➕ Add New Ticker..."]
         
         # Ticker selection (outside form for dynamic behavior)
-        selected_ticker_opt = st.selectbox("Ticker / Crypto Symbol", ticker_options)
+        selected_ticker_opt = st.selectbox("Ticker / Símbolo Crypto", ticker_options)
         
         ticker = ""
         if selected_ticker_opt == "➕ Add New Ticker...":
-            ticker = st.text_input("Enter New Ticker Symbol").upper()
+            ticker = st.text_input("Ingresar Nuevo Ticker").upper()
         else:
             ticker = selected_ticker_opt
 
@@ -92,13 +154,13 @@ def main():
             with col1:
                 # Ticker is already determined above
                 st.info(f"Selected Ticker: **{ticker if ticker else 'None'}**")
-                platform = st.selectbox("Platform", platform_names)
-                date = st.date_input("Date", datetime.date.today())
-                min_buy = st.selectbox("Purchase Currency", ["USD", "EUR", "ARS", "USDT"])
+                platform = st.selectbox("Plataforma", platform_names)
+                date = st.date_input("Fecha", datetime.date.today())
+                min_buy = st.selectbox("Moneda de Compra", ["USD", "EUR", "ARS", "USDT"])
 
             with col2:
-                quantity_input = st.text_input("Quantity", value="0.0")
-                price_input = st.text_input("Reference Price (per unit)", value="0.0")
+                quantity_input = st.text_input("Cantidad", value="0.0")
+                price_input = st.text_input("Precio de Referencia (p/unidad)", value="0.0")
                 
                 # Parse inputs
                 quantity = utils.safe_float(quantity_input)
@@ -128,14 +190,14 @@ def main():
                     comm_cost = base_cost * (comm_val / 100)
                 total_preview = base_cost + comm_cost
 
-            st.markdown(f"**Commission:** {comm_val} {comm_type} ({comm_curr})")
-            st.markdown(f"### Estimated Total: {min_buy} {total_preview:,.8f}" if total_preview < 1 else f"### Estimated Total: {min_buy} {total_preview:,.2f}")
+            st.markdown(f"**Comisión:** {comm_val} {comm_type} ({comm_curr})")
+            st.markdown(f"### Total Estimado: {min_buy} {total_preview:,.8f}" if total_preview < 1 else f"### Total Estimado: {min_buy} {total_preview:,.2f}")
 
-            submitted = st.form_submit_button("Save Investment")
+            submitted = st.form_submit_button("Guardar Inversión")
 
             if submitted:
                 if not ticker or quantity <= 0 or price <= 0:
-                    st.error("Please fill in Ticker, Quantity and Price correctly.")
+                    st.error("Por favor completa Ticker, Cantidad y Precio correctamente.")
                 else:
                     # Final Calculation
                     base_cost = quantity * price
@@ -166,10 +228,10 @@ def main():
                     df = pd.concat([df, pd.DataFrame([new_entry])], ignore_index=True)
                     db.save_data(df)
                     st.session_state["prices_updated"] = False # Reset flag to force update on dashboard
-                    st.success(f"Saved: {quantity} {ticker} for {total_cost:,.2f} {min_buy}")
+                    st.success(f"Guardado: {quantity} {ticker} por {total_cost:,.2f} {min_buy}")
 
     elif choice == "Dashboard":
-        st.subheader("Holdings Dashboard")
+        st.subheader("Panel de Activos")
         
         df = db.load_data()
 
@@ -209,7 +271,7 @@ def main():
             # Refresh the app every 1 minute to check for the update interval
             st_autorefresh(interval=60 * 1000, key="price_update_refresh")
 
-            should_update = st.button("🔄 Update Live Prices")
+            should_update = st.button("🔄 Actualizar Precios")
             
             # Check elapsed time for automatic update
             if st.session_state["last_update_time"]:
@@ -221,7 +283,7 @@ def main():
                 should_update = True
 
             if should_update:
-                with st.spinner("Fetching prices..."):
+                with st.spinner("Obteniendo precios..."):
                     # ... (rest of the fetching logic)
                     mep_rate = dolar_rates.get("MEP", 0.0)
                     
@@ -257,7 +319,7 @@ def main():
 
                     st.session_state["prices_updated"] = True
                     st.session_state["last_update_time"] = datetime.datetime.now()
-                    st.success(f"Prices updated! (Next auto-update in {PRICE_UPDATE_INTERVAL_MINUTES} mins)")
+                    st.success(f"¡Precios actualizados! (Próxima actualización en {PRICE_UPDATE_INTERVAL_MINUTES} min)")
 
             # Apply prices from session state
             # We map the session state prices to the dataframe
@@ -340,17 +402,17 @@ def main():
             edited_df = st.data_editor(
                 df_for_editor,
                 column_config={
-                    "Platform": st.column_config.TextColumn(disabled=True),
-                    "Ticker": st.column_config.TextColumn(disabled=True),
-                    "Quantity": st.column_config.TextColumn(disabled=True),
-                    "Total_Cost": st.column_config.TextColumn("Total Cost Basis", disabled=True),
-                    "Avg Buy Price": st.column_config.TextColumn(disabled=True),
-                    "Current Price (USD)": st.column_config.TextColumn(help="Edit prices in the asset rows. TOTAL row is read-only."),
-                    "Updated Value (USD)": st.column_config.TextColumn(disabled=True),
-                    "Day Chg ($)": st.column_config.TextColumn(disabled=True),
-                    "Day Chg (%)": st.column_config.TextColumn(disabled=True),
-                    "Result ($)": st.column_config.TextColumn(disabled=True),
-                    "Result (%)": st.column_config.TextColumn(disabled=True)
+                    "Platform": st.column_config.TextColumn("Plataforma", disabled=True),
+                    "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
+                    "Quantity": st.column_config.TextColumn("Cantidad", disabled=True),
+                    "Total_Cost": st.column_config.TextColumn("Costo Base Total", disabled=True),
+                    "Avg Buy Price": st.column_config.TextColumn("Precio Prom. Compra", disabled=True),
+                    "Current Price (USD)": st.column_config.TextColumn("Precio Actual (USD)", help="Edita precios en las filas de activos. La fila TOTAL es de solo lectura."),
+                    "Updated Value (USD)": st.column_config.TextColumn("Valor Actualizado (USD)", disabled=True),
+                    "Day Chg ($)": st.column_config.TextColumn("Var. Día ($)", disabled=True),
+                    "Day Chg (%)": st.column_config.TextColumn("Var. Día (%)", disabled=True),
+                    "Result ($)": st.column_config.TextColumn("Resultado ($)", disabled=True),
+                    "Result (%)": st.column_config.TextColumn("Resultado (%)", disabled=True)
                 },
                 hide_index=True,
                 use_container_width=True
@@ -401,7 +463,7 @@ def main():
                 # UI: Portfolio Header with Delta Capsule
                 col_title, col_delta = st.columns([3, 1])
                 with col_title:
-                    st.metric("Total Portfolio Value (USD)", f"${total_value:,.2f}", delta=f"${total_result:,.2f} ({total_result_pct:+.2%})")
+                    st.metric("Valor Total de Cartera (USD)", f"${total_value:,.2f}", delta=f"${total_result:,.2f} ({total_result_pct:+.2%})")
                 
                 with col_delta:
                     # Daily Variation "Capsule"
@@ -410,14 +472,14 @@ def main():
                     st.markdown(
                         f"""
                         <div style="background-color: {color}; color: white; padding: 10px 15px; border-radius: 20px; text-align: center; margin-top: 15px;">
-                            <span style="font-weight: bold; font-size: 0.9em;">DAILY UPDATE</span><br>
+                            <span style="font-weight: bold; font-size: 0.9em;">ACTUALIZACIÓN DIARIA</span><br>
                             <span style="font-size: 1.2em;">{symbol} ${abs(daily_change_usd):,.2f} ({daily_change_pct:+.2%})</span>
                         </div>
                         """,
                         unsafe_allow_html=True
                     )
                 
-                st.subheader("Detailed Breakdown")
+                st.subheader("Desglose Detallado")
                 
                 # Prepare display dataframe using the RAW transactions (df)
                 # Apply current prices to EACH transaction
@@ -471,9 +533,9 @@ def main():
                 
                 # --- NEW: Portfolio Progress Chart ---
                 st.divider()
-                st.subheader("📈 Portfolio Evolution")
+                st.subheader("📈 Evolución de Cartera")
                 
-                with st.spinner("Calculating historical progress..."):
+                with st.spinner("Calculando progreso histórico..."):
                     try:
                         # 1. Prepare Daily Timeline
                         df["Date"] = pd.to_datetime(df["Date"])
@@ -575,12 +637,12 @@ def main():
                             total_gain = last_market_val - last_invested
                             total_gain_pct = (last_market_val / last_invested - 1) if last_invested > 0 else 0
                             
-                            st.caption(f"Historical result: **${total_gain:,.2f} ({total_gain_pct:+.2%})** relative to total investment.")
+                            st.caption(f"Resultado histórico: **${total_gain:,.2f} ({total_gain_pct:+.2%})** con respecto a la inversión total.")
                         else:
-                            st.info("Not enough historical data to generate chart yet.")
-                            
+                            st.info("No hay suficientes datos históricos para generar el gráfico.")
+                        
                     except Exception as e:
-                        st.error(f"Error generating chart: {e}")
+                        st.error(f"Error al generar el gráfico: {e}")
 
                 # --- NEW: Summary by Platform ---
                 st.divider()
@@ -615,18 +677,18 @@ def main():
         else:
             st.info("No investments found. Go to 'New Entry' to add some.")
 
-    elif choice == "Settings":
-        st.subheader("⚙️ Configuration")
+    elif choice == "Configuración":
+        st.subheader("⚙️ Configuración")
         settings = db.load_settings()
         
         # 1. API Integration Settings
-        st.markdown("### API Integration")
-        st.info("API Keys are now managed via Streamlit Secrets for security.")
+        st.markdown("### Integración de API")
+        st.info("Las llaves de API ahora se gestionan a través de Streamlit Secrets por seguridad.")
         
-        with st.expander("How to configure API Keys"):
+        with st.expander("Cómo configurar las llaves de API"):
             st.markdown("""
-            **Locally:**
-            Create a file `.streamlit/secrets.toml` with:
+            **Localmente:**
+            Crea un archivo `.streamlit/secrets.toml` con:
             ```toml
             [api_keys]
             binance_key = "YOUR_KEY"
@@ -647,8 +709,8 @@ def main():
         st.divider()
 
         # 2. Platform Configuration
-        st.markdown("### Platform Configuration")
-        st.markdown("Configure entry/exit commissions and currency per platform.")
+        st.markdown("### Configuración de Plataformas")
+        st.markdown("Configura comisiones de entrada/salida y moneda por plataforma.")
         
         platforms_df = db.load_platforms()
         
@@ -668,16 +730,16 @@ def main():
             key="platform_editor"
         )
         
-        if st.button("💾 Save Platform Settings"):
+        if st.button("💾 Guardar Configuración de Plataformas"):
             db.save_platforms(edited_platforms_df)
-            st.success("Platform settings saved!")
+            st.success("¡Configuración de plataformas guardada!")
             st.rerun()
 
         st.divider()
 
         # 3. Ticker Configuration
-        st.markdown("### Ticker Configuration")
-        st.markdown("Select where to fetch data for each asset.")
+        st.markdown("### Configuración de Tickers")
+        st.markdown("Selecciona de dónde obtener datos para cada activo.")
         
         df = db.load_data()
         if not df.empty:
@@ -709,17 +771,17 @@ def main():
                 key="ticker_editor_v2"
             )
             
-            if st.button("💾 Save Ticker Settings"):
+            if st.button("💾 Guardar Configuración de Tickers"):
                 new_config = {}
                 for _, row in edited_ticker_df.iterrows():
                     new_config[row["Ticker"]] = row["Data Source"]
                 
                 settings["ticker_config"] = new_config
                 db.save_settings(settings)
-                st.success("Ticker settings saved!")
+                st.success("¡Configuración de tickers guardada!")
                 st.rerun()
         else:
-            st.info("No tickers found yet. Add some investments first.")
+            st.info("Aún no se encuentran tickers. Agrega algunas inversiones primero.")
 
 
 if __name__ == "__main__":
