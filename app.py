@@ -739,49 +739,51 @@ def main():
 
         # 3. Ticker Configuration
         st.markdown("### Configuración de Tickers")
-        st.markdown("Selecciona de dónde obtener datos para cada activo.")
+        st.markdown("Selecciona de dónde obtener datos para cada activo o agrega nuevos.")
         
         df = db.load_data()
-        if not df.empty:
-            unique_tickers = sorted(df["Ticker"].unique())
+        current_config = settings.get("ticker_config", {})
+        unique_from_data = df["Ticker"].unique().tolist() if not df.empty else []
+        
+        # Combine tickers from config and existing data
+        all_tickers = sorted(list(set(list(current_config.keys()) + unique_from_data)))
+        
+        ticker_config_data = []
+        for t in all_tickers:
+            ticker_config_data.append({
+                "Ticker": t,
+                "Data Source": current_config.get(t, "Manual")
+            })
+        
+        ticker_df = pd.DataFrame(ticker_config_data)
+        
+        edited_ticker_df = st.data_editor(
+            ticker_df,
+            column_config={
+                "Ticker": st.column_config.TextColumn("Ticker", required=True),
+                "Data Source": st.column_config.SelectboxColumn(
+                    "Origen de Datos",
+                    options=["Manual", "Binance API", "Argentina (BYMA)", "Stock API"],
+                    required=True
+                )
+            },
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            key="ticker_editor_v3"
+        )
+        
+        if st.button("💾 Guardar Configuración de Tickers"):
+            new_config = {}
+            for _, row in edited_ticker_df.iterrows():
+                ticker_str = str(row["Ticker"]).strip().upper()
+                if ticker_str:
+                    new_config[ticker_str] = row["Data Source"]
             
-            # Prepare data for editor
-            ticker_config_data = []
-            current_config = settings.get("ticker_config", {})
-            
-            for t in unique_tickers:
-                ticker_config_data.append({
-                    "Ticker": t,
-                    "Data Source": current_config.get(t, "Manual")
-                })
-            
-            ticker_df = pd.DataFrame(ticker_config_data)
-            
-            edited_ticker_df = st.data_editor(
-                ticker_df,
-                column_config={
-                    "Ticker": st.column_config.TextColumn(disabled=True),
-                    "Data Source": st.column_config.SelectboxColumn(
-                        options=["Manual", "Binance API", "Argentina (BYMA)", "Stock API"],
-                        required=True
-                    )
-                },
-                hide_index=True,
-                use_container_width=True,
-                key="ticker_editor_v2"
-            )
-            
-            if st.button("💾 Guardar Configuración de Tickers"):
-                new_config = {}
-                for _, row in edited_ticker_df.iterrows():
-                    new_config[row["Ticker"]] = row["Data Source"]
-                
-                settings["ticker_config"] = new_config
-                db.save_settings(settings)
-                st.success("¡Configuración de tickers guardada!")
-                st.rerun()
-        else:
-            st.info("Aún no se encuentran tickers. Agrega algunas inversiones primero.")
+            settings["ticker_config"] = new_config
+            db.save_settings(settings)
+            st.success("¡Configuración de tickers guardada!")
+            st.rerun()
 
 
 if __name__ == "__main__":
