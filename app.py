@@ -100,7 +100,7 @@ def main():
     if "menu_choice" not in st.session_state:
         st.session_state["menu_choice"] = "Dashboard"
 
-    menu = ["Dashboard", "Ingresar Compra", "Configuración"]
+    menu = ["Dashboard", "Ingresar Compra", "Ingresar Beneficios", "Configuración"]
     
     # Render banners
     for item in menu:
@@ -230,12 +230,98 @@ def main():
                     st.session_state["prices_updated"] = False # Reset flag to force update on dashboard
                     st.success(f"Guardado: {quantity} {ticker} por {total_cost:,.2f} {min_buy}")
 
+    elif choice == "Ingresar Beneficios":
+        st.subheader("Cargar Beneficios / Cobros")
+        
+        # Load tickers for selection
+        settings = db.load_settings()
+        ticker_config = settings.get("ticker_config", {})
+        existing_tickers = sorted(list(ticker_config.keys()))
+        
+        # Load current data to suggest tickers from investments if settings is empty
+        if not existing_tickers:
+            df_inv = db.load_data()
+            if not df_inv.empty:
+                existing_tickers = sorted(df_inv["Ticker"].unique().tolist())
+        
+        ticker_options = existing_tickers + ["➕ Add New Ticker..."]
+        
+        selected_ticker_opt = st.selectbox("Ticker o Crypto de referencia", ticker_options)
+        
+        ticker = ""
+        asset_type = "Acción ARG"
+        if selected_ticker_opt == "➕ Add New Ticker...":
+            ticker = st.text_input("Ingresar Nuevo Ticker/Crypto").upper()
+        else:
+            ticker = selected_ticker_opt
+            ticker_info = ticker_config.get(ticker, {})
+            if isinstance(ticker_info, dict):
+                asset_type = ticker_info.get("type", "Acción ARG")
+
+        with st.form("earnings_form"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.info(f"Activo: **{ticker if ticker else 'None'}** ({asset_type})")
+                
+                # Dynamic defaults based on asset type
+                benefit_options = ["Dividendo", "Staking", "Interés ON", "Capital ON", "Interés Bono", "Capital Bono", "Rescate FCI"]
+                default_benefit_idx = 0
+                if asset_type == "Crypto":
+                    default_benefit_idx = 1 # Staking
+                elif asset_type == "Obligación Negociable":
+                    default_benefit_idx = 2 # Interés ON
+                elif asset_type == "Bono":
+                    default_benefit_idx = 4 # Interés Bono
+                elif asset_type == "Fondo Común de Inversión":
+                    default_benefit_idx = 6 # Rescate FCI
+
+                benefit_type = st.selectbox("Tipo de Beneficio", benefit_options, index=default_benefit_idx)
+                
+                currency_options = ["ARS", "USD MEP", "USD CCL", "Crypto"]
+                default_curr_idx = 0
+                if asset_type == "Crypto":
+                    default_curr_idx = 3 # Crypto
+                elif asset_type in ["CEDEAR", "Acción EEUU", "Obligación Negociable", "Fondo Común de Inversión"]:
+                    default_curr_idx = 1 # USD MEP (Common for these in ARG, though FCI ARS exists too)
+
+                currency = st.selectbox("Moneda", currency_options, index=default_curr_idx)
+                date = st.date_input("Fecha", datetime.date.today())
+
+            with col2:
+                amount_input = st.text_input("Monto", value="0.0")
+                cap_red_input = st.text_input("Monto que reduce del capital", value="0.0")
+                
+                amount = utils.safe_float(amount_input)
+                cap_red = utils.safe_float(cap_red_input)
+            
+            submitted = st.form_submit_button("Guardar Beneficio")
+
+            if submitted:
+                if not ticker or amount < 0:
+                    st.error("Por favor completa Ticker y Monto correctamente.")
+                else:
+                    new_earning = {
+                        "Date": date,
+                        "Ticker": ticker,
+                        "Type": benefit_type,
+                        "Currency": currency,
+                        "Amount": amount,
+                        "Capital_Reduction": cap_red
+                    }
+
+                    df_earn = db.load_earnings()
+                    df_earn = pd.concat([df_earn, pd.DataFrame([new_earning])], ignore_index=True)
+                    db.save_earnings(df_earn)
+                    st.success(f"Guardado: {amount} {currency} como {benefit_type} para {ticker}")
+
     elif choice == "Dashboard":
         st.subheader("Panel de Activos")
         
         df = db.load_data()
+        df_earn = db.load_earnings()
 
-        if not df.empty:
+        if not df.empty or not df_earn.empty:
             mep_rate = dolar_rates.get("MEP", 0.0)
             
             # Convert all costs to USD for accurate calculation and grouping
@@ -244,12 +330,37 @@ def main():
                     return row["Total_Cost"] / mep_rate
                 return row["Total_Cost"]
             
-            df["Total_Cost_USD"] = df.apply(to_usd, axis=1)
+            # Cost Basis Adjustment and Earnings Integration
+            # Convert earnings to USD
+            def earn_to_usd(row):
+                if row["Currency"] == "ARS" and mep_rate > 0:
+                    return row["Amount"] / mep_rate, row["Capital_Reduction"] / mep_rate
+                return row["Amount"], row["Capital_Reduction"]
 
-            # Group by Platform and Ticker - Summing the USD costs
-            grouped_df = df.groupby(["Platform", "Ticker"])[["Quantity", "Total_Cost_USD"]].sum().reset_index()
-            # Rename for consistency with downstream code
-            grouped_df = grouped_df.rename(columns={"Total_Cost_USD": "Total_Cost"})
+            if not df_earn.empty:
+                df_earn[["Amount_USD", "Cap_Red_USD"]] = df_earn.apply(
+                    lambda r: pd.Series(earn_to_usd(r)), axis=1
+                )
+            
+            # Combine investments and earnings for grouping
+            # First, group investments as before
+            df["Total_Cost_USD"] = df.apply(to_usd, axis=1)
+            grouped_inv = df.groupby(["Platform", "Ticker"])[["Quantity", "Total_Cost_USD"]].sum().reset_index()
+            
+            # Group earnings by Ticker
+            ticker_earnings = df_earn.groupby("Ticker")[["Amount_USD", "Cap_Red_USD"]].sum().reset_index() if not df_earn.empty else pd.DataFrame(columns=["Ticker", "Amount_USD", "Cap_Red_USD"])
+            
+            # Merge investments with ticker-level earnings
+            grouped_df = grouped_inv.copy()
+            # Standardize column name
+            grouped_df = grouped_df.rename(columns={"Total_Cost_USD": "Total_Cost_Base"})
+            
+            # Since earnings can be many, we aggregate them and then join
+            grouped_df = pd.merge(grouped_df, ticker_earnings, on="Ticker", how="left").fillna(0)
+            
+            # Final Calculations:
+            # Adjusted Cost = Base Cost - Capital Reduction
+            grouped_df["Total_Cost"] = grouped_df["Total_Cost_Base"] - grouped_df["Cap_Red_USD"]
 
             # Load settings for ticker source
             settings = db.load_settings()
@@ -289,7 +400,8 @@ def main():
                     
                     for index, row in grouped_df.iterrows():
                         ticker = row["Ticker"]
-                        source = ticker_config.get(ticker, "Manual")
+                        ticker_info = ticker_config.get(ticker, {})
+                        source = ticker_info.get("source", "Manual") if isinstance(ticker_info, dict) else ticker_info
                         
                         if source != "Manual":
                             price, currency, prev_close = md.get_market_price(ticker, source)
@@ -327,9 +439,10 @@ def main():
 
             # Pre-calculate derived columns for the editor
             grouped_df["Updated Value (USD)"] = grouped_df["Quantity"] * grouped_df["Current Price (USD)"]
-            grouped_df["Result ($)"] = grouped_df["Updated Value (USD)"] - grouped_df["Total_Cost"]
+            # Result ($) = Current Value - Adjusted Cost + Realized Earnings
+            grouped_df["Result ($)"] = (grouped_df["Updated Value (USD)"] - grouped_df["Total_Cost"]) + grouped_df["Amount_USD"]
             grouped_df["Result (%)"] = grouped_df.apply(
-                lambda row: f"{(row['Updated Value (USD)'] / row['Total_Cost'] - 1):+.2%}" if row["Total_Cost"] > 0 else "0.00%", 
+                lambda row: f"{((row['Updated Value (USD)'] + row['Amount_USD']) / row['Total_Cost_Base'] - 1):+.2%}" if row["Total_Cost_Base"] > 0 else "0.00%", 
                 axis=1
             )
             
@@ -484,6 +597,7 @@ def main():
                 # Prepare display dataframe using the RAW transactions (df)
                 # Apply current prices to EACH transaction
                 breakdown_df = df.copy()
+                breakdown_df["Type"] = "Compra" # Label for visual consistency
                 breakdown_df["Current Price (USD)"] = breakdown_df["Ticker"].map(st.session_state["Current Price (USD)"]).fillna(0.0)
                 breakdown_df["Updated Value (USD)"] = breakdown_df["Quantity"] * breakdown_df["Current Price (USD)"]
                 breakdown_df["Result ($)"] = breakdown_df["Updated Value (USD)"] - breakdown_df["Total_Cost_USD"]
@@ -492,8 +606,25 @@ def main():
                     axis=1
                 )
 
+                # Append Earnings to the detailed breakdown
+                if not df_earn.empty:
+                    earn_display = df_earn.copy()
+                    # Standardize columns to match breakdown_df
+                    earn_display = earn_display.rename(columns={"Type": "Benefit_Type"})
+                    earn_display["Type"] = earn_display["Benefit_Type"]
+                    earn_display["Platform"] = "Varios" # Benefit is global or from many invs
+                    earn_display["Quantity"] = 0.0
+                    earn_display["Price"] = 0.0
+                    earn_display["Total_Cost_USD"] = -earn_display["Cap_Red_USD"] # Negative cost = reduction
+                    earn_display["Current Price (USD)"] = 0.0
+                    earn_display["Updated Value (USD)"] = earn_display["Amount_USD"]
+                    earn_display["Result ($)"] = earn_display["Amount_USD"] # Direct result
+                    earn_display["Result (%)"] = 0.0 # N/A for individual earnings
+                    
+                    breakdown_df = pd.concat([breakdown_df, earn_display], ignore_index=True)
+
                 # Select and format columns for display
-                display_cols = ["Date", "Platform", "Ticker", "Quantity", "Price", "Currency", "Total_Cost_USD", "Current Price (USD)", "Updated Value (USD)", "Result ($)", "Result (%)"]
+                display_cols = ["Date", "Platform", "Ticker", "Type", "Quantity", "Price", "Currency", "Total_Cost_USD", "Current Price (USD)", "Updated Value (USD)", "Result ($)", "Result (%)"]
                 display_df = breakdown_df[display_cols].copy()
 
                 # Format Date for display
@@ -546,7 +677,10 @@ def main():
                         # 2. Get Historical Prices
                         # Get unique tickers and their sources
                         unique_tickers = df["Ticker"].unique()
-                        tickers_to_fetch = {t: ticker_config.get(t, "Manual") for t in unique_tickers}
+                        tickers_to_fetch = {}
+                        for t in unique_tickers:
+                            info = ticker_config.get(t, {})
+                            tickers_to_fetch[t] = info.get("source", "Manual") if isinstance(info, dict) else info
                         
                         # Add ARS/USD for conversion
                         # Note: We use ARSUSD=X or just calculate a constant if not found
@@ -586,10 +720,21 @@ def main():
                                 
                             invested_capital = current_df["Total_Cost_USD"].sum()
                             
+                            # Realized earnings up to this day
+                            realized_earnings = 0.0
+                            cap_reduction = 0.0
+                            if not df_earn.empty:
+                                mask_earn = pd.to_datetime(df_earn["Date"]) <= d
+                                realized_earnings = df_earn[mask_earn]["Amount_USD"].sum()
+                                cap_reduction = df_earn[mask_earn]["Cap_Red_USD"].sum()
+                            
                             # Market Value
-                            market_value = 0.0
+                            market_value = realized_earnings # Start with earnings
                             # Group by ticker to get current cumulative quantity
                             holdings = current_df.groupby("Ticker")["Quantity"].sum()
+                            
+                            # Adjust invested capital by reduction
+                            invested_capital = invested_capital - cap_reduction
                             
                             for t, qty in holdings.items():
                                 if t in historical_prices.columns:
@@ -750,12 +895,23 @@ def main():
         
         ticker_config_data = []
         for t in all_tickers:
-            ticker_config_data.append({
-                "Ticker": t,
-                "Data Source": current_config.get(t, "Manual")
-            })
+            info = current_config.get(t, {})
+            if isinstance(info, dict):
+                ticker_config_data.append({
+                    "Ticker": t,
+                    "Data Source": info.get("source", "Manual"),
+                    "Type": info.get("type", "Acción ARG")
+                })
+            else:
+                ticker_config_data.append({
+                    "Ticker": t,
+                    "Data Source": info,
+                    "Type": "Acción ARG"
+                })
         
         ticker_df = pd.DataFrame(ticker_config_data)
+        
+        asset_types = ["Crypto", "Acción ARG", "Cedear", "Acción EEUU", "Obligación Negociable", "Bono", "Fondo Común de Inversión"]
         
         edited_ticker_df = st.data_editor(
             ticker_df,
@@ -765,12 +921,17 @@ def main():
                     "Origen de Datos",
                     options=["Manual", "Binance API", "Argentina (BYMA)", "Stock API"],
                     required=True
+                ),
+                "Type": st.column_config.SelectboxColumn(
+                    "Tipo de Activo",
+                    options=asset_types,
+                    required=True
                 )
             },
             num_rows="dynamic",
             hide_index=True,
             use_container_width=True,
-            key="ticker_editor_v3"
+            key="ticker_editor_v4"
         )
         
         if st.button("💾 Guardar Configuración de Tickers"):
@@ -778,7 +939,10 @@ def main():
             for _, row in edited_ticker_df.iterrows():
                 ticker_str = str(row["Ticker"]).strip().upper()
                 if ticker_str:
-                    new_config[ticker_str] = row["Data Source"]
+                    new_config[ticker_str] = {
+                        "source": row["Data Source"],
+                        "type": row["Type"]
+                    }
             
             settings["ticker_config"] = new_config
             db.save_settings(settings)

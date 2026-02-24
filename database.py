@@ -61,9 +61,22 @@ def init_worksheets(sh):
         # Settings Sheet (Ticker Config)
         try:
             ws_settings = sh.worksheet("Settings")
+            # Upgrade check: ensure "Type" column exists
+            headers = ws_settings.row_values(1)
+            if "Type" not in headers:
+                ws_settings.update_cell(1, 3, "Type")
         except gspread.WorksheetNotFound:
             ws_settings = sh.add_worksheet(title="Settings", rows=100, cols=5)
-            ws_settings.append_row(["Ticker", "Data Source"])
+            ws_settings.append_row(["Ticker", "Data Source", "Type"])
+
+        # Earnings Sheet
+        try:
+            ws_earn = sh.worksheet("Earnings")
+        except gspread.WorksheetNotFound:
+            ws_earn = sh.add_worksheet(title="Earnings", rows=1000, cols=10)
+            ws_earn.append_row([
+                "Date", "Ticker", "Type", "Currency", "Amount", "Capital_Reduction"
+            ])
 
         return ws_inv, ws_settings
     except Exception as e:
@@ -135,7 +148,10 @@ def load_settings():
     config = {}
     for r in records:
         if r["Ticker"]:
-            config[r["Ticker"]] = r["Data Source"]
+            config[r["Ticker"]] = {
+                "source": r.get("Data Source", "Manual"),
+                "type": r.get("Type", "Acción ARG") # Default to some type if missing
+            }
     settings["ticker_config"] = config
     
     return settings
@@ -147,13 +163,25 @@ def save_settings(settings):
     
     # Prepare dataframe
     config_data = []
-    for ticker, source in settings.get("ticker_config", {}).items():
-        config_data.append({"Ticker": ticker, "Data Source": source})
+    for ticker, info in settings.get("ticker_config", {}).items():
+        if isinstance(info, dict):
+            config_data.append({
+                "Ticker": ticker, 
+                "Data Source": info.get("source", "Manual"),
+                "Type": info.get("type", "Acción ARG")
+            })
+        else:
+            # Migration path for old format
+            config_data.append({
+                "Ticker": ticker, 
+                "Data Source": info,
+                "Type": "Acción ARG"
+            })
     
     df_config = pd.DataFrame(config_data)
     
     ws_settings.clear()
-    ws_settings.append_row(["Ticker", "Data Source"])
+    ws_settings.append_row(["Ticker", "Data Source", "Type"])
     if not df_config.empty:
         ws_settings.append_rows(df_config.values.tolist())
 
@@ -182,3 +210,38 @@ def save_platforms(df):
             ws.append_rows(df.values.tolist())
     except Exception as e:
         st.error(f"Error al guardar plataformas: {e}")
+
+def load_earnings():
+    sh = get_db_connection()
+    try:
+        ws = sh.worksheet("Earnings")
+        data = ws.get_all_records(value_render_option='UNFORMATTED_VALUE')
+        if data:
+            df = pd.DataFrame(data)
+            # Ensure numeric types
+            numeric_cols = ["Amount", "Capital_Reduction"]
+            for col in numeric_cols:
+                if col in df.columns:
+                    df[col] = df[col].apply(utils.safe_float)
+            return df
+        else:
+            return pd.DataFrame(columns=["Date", "Ticker", "Type", "Currency", "Amount", "Capital_Reduction"])
+    except:
+        return pd.DataFrame(columns=["Date", "Ticker", "Type", "Currency", "Amount", "Capital_Reduction"])
+
+def save_earnings(df):
+    sh = get_db_connection()
+    try:
+        ws = sh.worksheet("Earnings")
+        
+        df_tosave = df.copy()
+        if "Date" in df_tosave.columns:
+            df_tosave["Date"] = df_tosave["Date"].astype(str)
+        df_tosave = df_tosave.fillna("")
+
+        ws.clear()
+        ws.append_row(df_tosave.columns.tolist())
+        if not df_tosave.empty:
+            ws.append_rows(df_tosave.values.tolist())
+    except Exception as e:
+        st.error(f"Error al guardar beneficios: {e}")
