@@ -6,6 +6,7 @@ import utils
 
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
+@st.cache_resource
 def get_db_connection():
     """Connect to Google Sheets using st.secrets or local credentials.json"""
     try:
@@ -72,10 +73,15 @@ def init_worksheets(sh):
         # Earnings Sheet
         try:
             ws_earn = sh.worksheet("Earnings")
+            # Upgrade check: ensure "Platform" column exists
+            headers_earn = ws_earn.row_values(1)
+            if "Platform" not in headers_earn:
+                # Add "Platform" as the 3rd column
+                ws_earn.insert_cols([["Platform"]], col=3)
         except gspread.WorksheetNotFound:
             ws_earn = sh.add_worksheet(title="Earnings", rows=1000, cols=10)
             ws_earn.append_row([
-                "Date", "Ticker", "Type", "Currency", "Amount", "Capital_Reduction"
+                "Date", "Ticker", "Platform", "Type", "Currency", "Amount", "Capital_Reduction"
             ])
 
         return ws_inv, ws_settings
@@ -83,6 +89,7 @@ def init_worksheets(sh):
         st.error(f"Error de inicialización de hojas: {e}")
         st.stop()
 
+@st.cache_data(ttl=600)
 def load_data():
     sh = get_db_connection()
     ws_inv, _ = init_worksheets(sh)
@@ -111,6 +118,7 @@ def load_data():
         ])
 
 def save_data(df):
+    st.cache_data.clear()
     sh = get_db_connection()
     ws_inv, _ = init_worksheets(sh)
     
@@ -129,6 +137,7 @@ def save_data(df):
     ws_inv.append_row(df_tosave.columns.tolist())
     ws_inv.append_rows(df_tosave.values.tolist())
 
+@st.cache_data(ttl=600)
 def load_settings():
     # 1. API Keys -> Load from st.secrets (Read-only security)
     # 2. Ticker Config -> Load from GSheet "Settings" tab
@@ -157,6 +166,7 @@ def load_settings():
     return settings
 
 def save_settings(settings):
+    st.cache_data.clear()
     # Only saves Ticker Config to Sheet. API keys must be managed in secrets.toml/cloud dashboard.
     sh = get_db_connection()
     _, ws_settings = init_worksheets(sh)
@@ -185,6 +195,7 @@ def save_settings(settings):
     if not df_config.empty:
         ws_settings.append_rows(df_config.values.tolist())
 
+@st.cache_data(ttl=600)
 def load_platforms():
     sh = get_db_connection()
     try:
@@ -201,6 +212,7 @@ def load_platforms():
         return pd.DataFrame(columns=["Platform", "Entry Commission", "Entry Type", "Exit Commission", "Exit Type", "Commission Currency"])
 
 def save_platforms(df):
+    st.cache_data.clear()
     sh = get_db_connection()
     try:
         ws = sh.worksheet("Platforms")
@@ -211,6 +223,7 @@ def save_platforms(df):
     except Exception as e:
         st.error(f"Error al guardar plataformas: {e}")
 
+@st.cache_data(ttl=600)
 def load_earnings():
     sh = get_db_connection()
     try:
@@ -218,6 +231,12 @@ def load_earnings():
         data = ws.get_all_records(value_render_option='UNFORMATTED_VALUE')
         if data:
             df = pd.DataFrame(data)
+            # Ensure all expected columns exist
+            expected_cols = ["Date", "Ticker", "Platform", "Type", "Currency", "Amount", "Capital_Reduction"]
+            for col in expected_cols:
+                if col not in df.columns:
+                    df[col] = ""
+
             # Ensure numeric types
             numeric_cols = ["Amount", "Capital_Reduction"]
             for col in numeric_cols:
@@ -225,11 +244,12 @@ def load_earnings():
                     df[col] = df[col].apply(utils.safe_float)
             return df
         else:
-            return pd.DataFrame(columns=["Date", "Ticker", "Type", "Currency", "Amount", "Capital_Reduction"])
+            return pd.DataFrame(columns=["Date", "Ticker", "Platform", "Type", "Currency", "Amount", "Capital_Reduction"])
     except:
-        return pd.DataFrame(columns=["Date", "Ticker", "Type", "Currency", "Amount", "Capital_Reduction"])
+        return pd.DataFrame(columns=["Date", "Ticker", "Platform", "Type", "Currency", "Amount", "Capital_Reduction"])
 
 def save_earnings(df):
+    st.cache_data.clear()
     sh = get_db_connection()
     try:
         ws = sh.worksheet("Earnings")

@@ -1,10 +1,12 @@
 import requests
 import yfinance as yf
 import pandas as pd
+import streamlit as st
 
+@st.cache_data(ttl=1800) # Cache for 30 minutes
 def get_dolar_rates():
     """Fetch MEP, CCL and Cripto rates from dolarapi.com + Variation proxy"""
-    rates = {"MEP": 0.0, "CCL": 0.0, "Cripto": 0.0, "variation": 0.0}
+    rates = {"MEP": 0.0, "CCL": 0.0, "Cripto": 0.0, "Blue": 0.0, "variation": 0.0}
     try:
         # Fetch MEP
         resp_mep = requests.get("https://dolarapi.com/v1/dolares/bolsa", timeout=5)
@@ -20,6 +22,11 @@ def get_dolar_rates():
         resp_crypto = requests.get("https://dolarapi.com/v1/dolares/cripto", timeout=5)
         if resp_crypto.status_code == 200:
             rates["Cripto"] = resp_crypto.json().get("venta", 0.0)
+
+        # Fetch Blue
+        resp_blue = requests.get("https://dolarapi.com/v1/dolares/blue", timeout=5)
+        if resp_blue.status_code == 200:
+            rates["Blue"] = resp_blue.json().get("venta", 0.0)
 
         # Proxy for dollar variation (ARS=X which is USD/ARS exchange rate)
         try:
@@ -114,6 +121,7 @@ def get_market_price(ticker, source):
         
     return price, currency, prev_close
 
+@st.cache_data(ttl=3600) # Cache for 1 hour
 def get_historical_prices(tickers_with_sources, start_date):
     """
     Fetch historical prices for a list of tickers from yfinance.

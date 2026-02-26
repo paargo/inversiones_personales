@@ -21,7 +21,7 @@ def main():
     # Fetch BTC price for the header
     btc_price, _, btc_prev_close = md.get_market_price("BTC", "Binance API")
     
-    col_mep, col_ccl, col_crypto, col_btc = st.columns(4)
+    col_mep, col_ccl, col_blue, col_crypto, col_btc = st.columns(5)
     
     # Helper for small variation capsules
     def metric_capsule(variation):
@@ -38,6 +38,9 @@ def main():
     
     col_ccl.metric("Dólar CCL", f"${dolar_rates['CCL']:,.2f}")
     col_ccl.markdown(metric_capsule(dolar_rates.get("variation", 0.0)), unsafe_allow_html=True)
+
+    col_blue.metric("Dólar Blue", f"${dolar_rates['Blue']:,.2f}")
+    col_blue.markdown(metric_capsule(dolar_rates.get("variation", 0.0)), unsafe_allow_html=True)
     
     col_crypto.metric("Dólar Cripto", f"${dolar_rates['Cripto']:,.2f}")
     col_crypto.markdown(metric_capsule(dolar_rates.get("variation", 0.0)), unsafe_allow_html=True)
@@ -100,7 +103,7 @@ def main():
     if "menu_choice" not in st.session_state:
         st.session_state["menu_choice"] = "Dashboard"
 
-    menu = ["Dashboard", "Ingresar Compra", "Ingresar Beneficios", "Configuración"]
+    menu = ["Dashboard", "Ingresar Compra", "Detalle", "Ingresar Beneficios", "Configuración"]
     
     # Render banners
     for item in menu:
@@ -257,12 +260,20 @@ def main():
             ticker_info = ticker_config.get(ticker, {})
             if isinstance(ticker_info, dict):
                 asset_type = ticker_info.get("type", "Acción ARG")
+        
+        # Load platforms where this ticker is held
+        df_inv_all = db.load_data()
+        ticker_platforms = df_inv_all[df_inv_all["Ticker"] == ticker]["Platform"].unique().tolist() if not df_inv_all.empty else []
+        if not ticker_platforms:
+             ticker_platforms = ["Manual"]
 
         with st.form("earnings_form"):
             col1, col2 = st.columns(2)
             
             with col1:
                 st.info(f"Activo: **{ticker if ticker else 'None'}** ({asset_type})")
+                
+                platform = st.selectbox("Plataforma", ticker_platforms)
                 
                 # Dynamic defaults based on asset type
                 benefit_options = ["Dividendo", "Staking", "Interés ON", "Capital ON", "Interés Bono", "Capital Bono", "Rescate FCI"]
@@ -304,6 +315,7 @@ def main():
                     new_earning = {
                         "Date": date,
                         "Ticker": ticker,
+                        "Platform": platform,
                         "Type": benefit_type,
                         "Currency": currency,
                         "Amount": amount,
@@ -313,25 +325,21 @@ def main():
                     df_earn = db.load_earnings()
                     df_earn = pd.concat([df_earn, pd.DataFrame([new_earning])], ignore_index=True)
                     db.save_earnings(df_earn)
-                    st.success(f"Guardado: {amount} {currency} como {benefit_type} para {ticker}")
+                    st.success(f"Guardado: {amount} {currency} como {benefit_type} para {ticker} en {platform}")
 
-    elif choice == "Dashboard":
-        st.subheader("Panel de Activos")
-        
+    elif choice in ["Dashboard", "Detalle"]:
         df = db.load_data()
         df_earn = db.load_earnings()
 
         if not df.empty or not df_earn.empty:
             mep_rate = dolar_rates.get("MEP", 0.0)
             
-            # Convert all costs to USD for accurate calculation and grouping
+            # --- 1. Calculations (Moved up for early metric display) ---
             def to_usd(row):
                 if row["Currency"] == "ARS" and mep_rate > 0:
                     return row["Total_Cost"] / mep_rate
                 return row["Total_Cost"]
             
-            # Cost Basis Adjustment and Earnings Integration
-            # Convert earnings to USD
             def earn_to_usd(row):
                 if row["Currency"] == "ARS" and mep_rate > 0:
                     return row["Amount"] / mep_rate, row["Capital_Reduction"] / mep_rate
@@ -342,482 +350,199 @@ def main():
                     lambda r: pd.Series(earn_to_usd(r)), axis=1
                 )
             
-            # Combine investments and earnings for grouping
-            # First, group investments as before
             df["Total_Cost_USD"] = df.apply(to_usd, axis=1)
             grouped_inv = df.groupby(["Platform", "Ticker"])[["Quantity", "Total_Cost_USD"]].sum().reset_index()
+            ticker_earnings = df_earn.groupby(["Platform", "Ticker"])[["Amount_USD", "Cap_Red_USD"]].sum().reset_index() if not df_earn.empty else pd.DataFrame(columns=["Platform", "Ticker", "Amount_USD", "Cap_Red_USD"])
             
-            # Group earnings by Ticker
-            ticker_earnings = df_earn.groupby("Ticker")[["Amount_USD", "Cap_Red_USD"]].sum().reset_index() if not df_earn.empty else pd.DataFrame(columns=["Ticker", "Amount_USD", "Cap_Red_USD"])
-            
-            # Merge investments with ticker-level earnings
             grouped_df = grouped_inv.copy()
-            # Standardize column name
             grouped_df = grouped_df.rename(columns={"Total_Cost_USD": "Total_Cost_Base"})
-            
-            # Since earnings can be many, we aggregate them and then join
-            grouped_df = pd.merge(grouped_df, ticker_earnings, on="Ticker", how="left").fillna(0)
-            
-            # Final Calculations:
-            # Adjusted Cost = Base Cost - Capital Reduction
+            grouped_df = pd.merge(grouped_df, ticker_earnings, on=["Platform", "Ticker"], how="left").fillna(0)
             grouped_df["Total_Cost"] = grouped_df["Total_Cost_Base"] - grouped_df["Cap_Red_USD"]
 
-            # Load settings for ticker source
             settings = db.load_settings()
             ticker_config = settings.get("ticker_config", {})
-
             grouped_df["Avg Buy Price"] = grouped_df["Total_Cost"] / grouped_df["Quantity"]
             
-            # Helper to get current price (logic: if Binance API, fetch; else 0)
-            if "Current Price (USD)" not in st.session_state:
-                 st.session_state["Current Price (USD)"] = {}
-            if "Native Price" not in st.session_state:
-                 st.session_state["Native Price"] = {} # Store {Ticker: {Price: 100, Currency: ARS}}
-            if "Prev Close Price (USD)" not in st.session_state:
-                 st.session_state["Prev Close Price (USD)"] = {}
-            if "last_update_time" not in st.session_state:
-                 st.session_state["last_update_time"] = None
+            if "Current Price (USD)" not in st.session_state: st.session_state["Current Price (USD)"] = {}
+            if "Native Price" not in st.session_state: st.session_state["Native Price"] = {}
+            if "Prev Close Price (USD)" not in st.session_state: st.session_state["Prev Close Price (USD)"] = {}
+            if "last_update_time" not in st.session_state: st.session_state["last_update_time"] = None
 
-            # 3. Auto-update logic
-            # Refresh the app every 1 minute to check for the update interval
-            st_autorefresh(interval=60 * 1000, key="price_update_refresh")
-
-            should_update = st.button("🔄 Actualizar Precios")
-            
-            # Check elapsed time for automatic update
-            if st.session_state["last_update_time"]:
-                elapsed_minutes = (datetime.datetime.now() - st.session_state["last_update_time"]).total_seconds() / 60
-                if elapsed_minutes >= PRICE_UPDATE_INTERVAL_MINUTES:
-                    should_update = True
-            
-            if not st.session_state.get("prices_updated", False) and not grouped_df.empty:
-                should_update = True
-
-            if should_update:
-                with st.spinner("Obteniendo precios..."):
-                    # ... (rest of the fetching logic)
-                    mep_rate = dolar_rates.get("MEP", 0.0)
-                    
-                    for index, row in grouped_df.iterrows():
-                        ticker = row["Ticker"]
-                        ticker_info = ticker_config.get(ticker, {})
-                        source = ticker_info.get("source", "Manual") if isinstance(ticker_info, dict) else ticker_info
-                        
-                        if source != "Manual":
-                            price, currency, prev_close = md.get_market_price(ticker, source)
-                            
-                            if price > 0:
-                                # Store Native Info
-                                st.session_state["Native Price"][ticker] = {"price": price, "currency": currency}
-                                
-                                # Convert current price to USD
-                                price_usd = 0.0
-                                if currency == "USD" or currency == "USDT":
-                                    price_usd = price
-                                elif currency == "ARS" and mep_rate > 0:
-                                    price_usd = price / mep_rate
-                                
-                                st.session_state["Current Price (USD)"][ticker] = price_usd
-
-                                # Convert prev close to USD
-                                prev_close_usd = 0.0
-                                if prev_close > 0:
-                                    if currency in ["USD", "USDT"]:
-                                        prev_close_usd = prev_close
-                                    elif currency == "ARS" and mep_rate > 0:
-                                        prev_close_usd = prev_close / mep_rate
-                                
-                                st.session_state["Prev Close Price (USD)"][ticker] = prev_close_usd
-
-                    st.session_state["prices_updated"] = True
-                    st.session_state["last_update_time"] = datetime.datetime.now()
-                    st.success(f"¡Precios actualizados! (Próxima actualización en {PRICE_UPDATE_INTERVAL_MINUTES} min)")
-
-            # Apply prices from session state
-            # We map the session state prices to the dataframe
+            # Map storage to DF
             grouped_df["Current Price (USD)"] = grouped_df["Ticker"].map(st.session_state["Current Price (USD)"]).fillna(0.0)
-
-            # Pre-calculate derived columns for the editor
-            grouped_df["Updated Value (USD)"] = grouped_df["Quantity"] * grouped_df["Current Price (USD)"]
-            # Result ($) = Current Value - Adjusted Cost + Realized Earnings
-            grouped_df["Result ($)"] = (grouped_df["Updated Value (USD)"] - grouped_df["Total_Cost"]) + grouped_df["Amount_USD"]
+            grouped_df["Updated Value (USD)"] = (grouped_df["Quantity"] * grouped_df["Current Price (USD)"]) + grouped_df["Amount_USD"]
+            grouped_df["Result ($)"] = grouped_df["Updated Value (USD)"] - grouped_df["Total_Cost_Base"]
             grouped_df["Result (%)"] = grouped_df.apply(
-                lambda row: f"{((row['Updated Value (USD)'] + row['Amount_USD']) / row['Total_Cost_Base'] - 1):+.2%}" if row["Total_Cost_Base"] > 0 else "0.00%", 
+                lambda row: f"{(row['Updated Value (USD)'] / row['Total_Cost_Base'] - 1):+.2%}" if row["Total_Cost_Base"] > 0 else "0.00%", 
                 axis=1
             )
-            
-            # Daily Variation Columns
             grouped_df["Prev Close (USD)"] = grouped_df["Ticker"].map(st.session_state.get("Prev Close Price (USD)", {})).fillna(0.0)
             grouped_df["Day Chg ($)"] = grouped_df["Quantity"] * (grouped_df["Current Price (USD)"] - grouped_df["Prev Close (USD)"])
-            grouped_df["Day Chg (%)"] = (grouped_df["Day Chg ($)"] / (grouped_df["Quantity"] * grouped_df["Prev Close (USD)"])) if not (grouped_df["Quantity"] * grouped_df["Prev Close (USD)"]).empty else 0.0
-            # Handle (%) calculation per row
             grouped_df["Day Chg (%)"] = grouped_df.apply(
                 lambda row: (row["Day Chg ($)"] / (row["Quantity"] * row["Prev Close (USD)"])) if (row["Quantity"] * row["Prev Close (USD)"]) > 0 else 0.0,
                 axis=1
             )
-            
-            # Enrich with Native Price info for display
-            def get_native_display(ticker):
-                data = st.session_state.get("Native Price", {}).get(ticker)
-                if data:
-                    return f"{data['price']:,.2f} {data['currency']}"
-                return "-"
-            
-            grouped_df["Live Price (Native)"] = grouped_df["Ticker"].apply(get_native_display)
 
-            # Filter columns to show for editing
-            edit_cols = [
-                "Platform", "Ticker", "Quantity", "Total_Cost", "Avg Buy Price", 
-                "Current Price (USD)", "Updated Value (USD)", 
-                "Day Chg ($)", "Day Chg (%)",
-                "Result ($)", "Result (%)"
-            ]
-            
-            # Calculate Totals for the editor
-            total_cost_editor = grouped_df["Total_Cost"].sum()
-            total_value_editor = grouped_df["Updated Value (USD)"].sum()
-            total_result_editor = grouped_df["Result ($)"].sum()
-            total_result_pct_editor = (total_value_editor / total_cost_editor - 1) if total_cost_editor > 0 else 0
-            
-            total_day_chg_editor = grouped_df["Day Chg ($)"].sum()
-            total_day_prev_val = (grouped_df["Quantity"] * grouped_df["Prev Close (USD)"]).sum()
-            total_day_chg_pct_editor = (total_day_chg_editor / total_day_prev_val) if total_day_prev_val > 0 else 0
-            
-            total_row_editor = pd.DataFrame([{
-                "Platform": "TOTAL",
-                "Ticker": "",
-                "Quantity": "",
-                "Total_Cost": f"{total_cost_editor:,.2f}",
-                "Avg Buy Price": "",
-                "Current Price (USD)": "",
-                "Updated Value (USD)": f"{total_value_editor:,.2f}",
-                "Day Chg ($)": f"{total_day_chg_editor:+,.2f}",
-                "Day Chg (%)": f"{total_day_chg_pct_editor:+.2%}",
-                "Result ($)": f"{total_result_editor:+,.2f}",
-                "Result (%)": f"{total_result_pct_editor:+.2%}"
-            }])
-            
-            # For the editor to show empty strings, we convert the display columns to strings
-            # except Current Price which must stay numeric for editing the other rows.
-            # However, if we mix string and number in Current Price, it becomes object.
-            # Streamlit data_editor handles object columns as TextColumn by default.
-            
-            df_for_editor = grouped_df[edit_cols].copy()
-            # Format numeric columns as strings for the editor to match the TOTAL row style
-            # but KEEP Current Price as numeric for editing
-            for col in ["Quantity", "Total_Cost", "Avg Buy Price", "Updated Value (USD)", "Day Chg ($)", "Result ($)"]:
-                df_for_editor[col] = df_for_editor[col].apply(lambda x: f"{x:,.6f}" if "Quantity" in col or "Price" in col else f"{x:+,.2f}" if "Chg" in col or "Result" in col else f"{x:,.2f}")
-            
-            df_for_editor["Day Chg (%)"] = df_for_editor["Day Chg (%)"].apply(lambda x: f"{x:+.2%}")
-            
-            df_for_editor = pd.concat([df_for_editor, total_row_editor], ignore_index=True)
+            total_val = grouped_df["Updated Value (USD)"].sum()
+            total_res = grouped_df["Result ($)"].sum()
+            total_res_pct = (total_val / grouped_df["Total_Cost_Base"].sum() - 1) if grouped_df["Total_Cost_Base"].sum() > 0 else 0
+            day_chg_u = grouped_df["Day Chg ($)"].sum()
+            total_prev = (grouped_df["Quantity"] * grouped_df["Prev Close (USD)"]).sum()
+            day_chg_p = (day_chg_u / total_prev) if total_prev > 0 else 0.0
 
-            edited_df = st.data_editor(
-                df_for_editor,
-                column_config={
-                    "Platform": st.column_config.TextColumn("Plataforma", disabled=True),
-                    "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
-                    "Quantity": st.column_config.TextColumn("Cantidad", disabled=True),
-                    "Total_Cost": st.column_config.TextColumn("Costo Base Total", disabled=True),
-                    "Avg Buy Price": st.column_config.TextColumn("Precio Prom. Compra", disabled=True),
-                    "Current Price (USD)": st.column_config.TextColumn("Precio Actual (USD)", help="Edita precios en las filas de activos. La fila TOTAL es de solo lectura."),
-                    "Updated Value (USD)": st.column_config.TextColumn("Valor Actualizado (USD)", disabled=True),
-                    "Day Chg ($)": st.column_config.TextColumn("Var. Día ($)", disabled=True),
-                    "Day Chg (%)": st.column_config.TextColumn("Var. Día (%)", disabled=True),
-                    "Result ($)": st.column_config.TextColumn("Resultado ($)", disabled=True),
-                    "Result (%)": st.column_config.TextColumn("Resultado (%)", disabled=True)
-                },
-                hide_index=True,
-                use_container_width=True
-            )
-            
-            # Sync edits back to session state
-            if not edited_df.empty:
-                changes = False
-                for index, row in edited_df.iterrows():
-                    if row["Platform"] == "TOTAL":
-                        continue
-                    
-                    ticker = row["Ticker"]
-                    try:
-                        # Convert back to float since it's now string in the editor
-                        new_price = utils.safe_float(str(row["Current Price (USD)"]))
-                        if st.session_state["Current Price (USD)"].get(ticker) != new_price:
-                            st.session_state["Current Price (USD)"][ticker] = new_price
-                            changes = True
-                    except:
-                        pass
-                
-                if changes:
+            # --- 2. Top UI: Metrics and Delta ---
+            col_met, col_var = st.columns([3, 1])
+            with col_met:
+                st.metric("Valor Total de Cartera (USD)", f"${total_val:,.2f}", delta=f"${total_res:,.2f} ({total_res_pct:+.2%})")
+            with col_var:
+                color_v = "#28a745" if day_chg_u >= 0 else "#dc3545"
+                sym_v = "▲" if day_chg_u >= 0 else "▼"
+                st.markdown(f"""
+                    <div style="background-color: {color_v}; color: white; padding: 10px 15px; border-radius: 20px; text-align: center; margin-top: 15px;">
+                        <span style="font-weight: bold; font-size: 0.9em;">ACTUALIZACIÓN DIARIA</span><br>
+                        <span style="font-size: 1.2em;">{sym_v} ${abs(day_chg_u):,.2f} ({day_chg_p:+.2%})</span>
+                    </div>
+                """, unsafe_allow_html=True)
+            st.divider()
+
+            # --- 3. Section Title & Update Button Row ---
+            title_text = "Panel de Activos" if choice == "Dashboard" else "Detalle de Cartera"
+            col_t, col_b = st.columns([3, 1])
+            with col_t:
+                st.subheader(title_text)
+            with col_b:
+                should_update = st.button("🔄 Actualizar Precios", use_container_width=True)
+
+            # Auto-update logic
+            st_autorefresh(interval=60 * 1000, key="price_update_refresh")
+            if st.session_state["last_update_time"]:
+                el = (datetime.datetime.now() - st.session_state["last_update_time"]).total_seconds() / 60
+                if el >= PRICE_UPDATE_INTERVAL_MINUTES: should_update = True
+            if not st.session_state.get("prices_updated", False) and not grouped_df.empty: should_update = True
+
+            if should_update:
+                with st.spinner("Obteniendo precios..."):
+                    for idx, row in grouped_df.iterrows():
+                        tic = row["Ticker"]
+                        inf = ticker_config.get(tic, {})
+                        src = inf.get("source", "Manual") if isinstance(inf, dict) else inf
+                        if src != "Manual":
+                            p, cur, prev = md.get_market_price(tic, src)
+                            if p > 0:
+                                st.session_state["Native Price"][tic] = {"price": p, "currency": cur}
+                                p_u = p if cur in ["USD", "USDT"] else (p / mep_rate if mep_rate > 0 else 0)
+                                st.session_state["Current Price (USD)"][tic] = p_u
+                                prev_u = prev if cur in ["USD", "USDT"] else (prev / mep_rate if mep_rate > 0 else 0)
+                                st.session_state["Prev Close Price (USD)"][tic] = prev_u
+                    st.session_state["prices_updated"] = True
+                    st.session_state["last_update_time"] = datetime.datetime.now()
                     st.rerun()
 
-                # Proceed with Totals using only data rows (excluding the TOTAL row from editor)
-                data_df = edited_df[edited_df["Platform"] != "TOTAL"].copy()
-                
-                # Convert string columns back to numeric for math and formatting (they were formatted for display in the editor)
-                for col in ["Quantity", "Total_Cost", "Avg Buy Price", "Current Price (USD)", "Updated Value (USD)", "Result ($)"]:
-                    data_df[col] = data_df[col].apply(utils.safe_float)
-                
-                # Recalculate totals for display
-                total_value = data_df["Updated Value (USD)"].sum()
-                total_cost = data_df["Total_Cost"].sum()
-                total_result = data_df["Result ($)"].sum()
-                total_result_pct = (total_value / total_cost - 1) if total_cost > 0 else 0.0
-
-                st.divider()
-                
-                # Calculate Daily Delta
-                data_df["Prev Close (USD)"] = data_df["Ticker"].map(st.session_state.get("Prev Close Price (USD)", {})).fillna(0.0)
-                # If prev close is 0 (new asset or error), we use avg buy price or current price to avoid huge spikes?
-                # Actually, if we want "Daily Update", if we don't have yesterday's price, variation is 0 for that asset.
-                daily_change_usd = (data_df["Quantity"] * (data_df["Current Price (USD)"] - data_df["Prev Close (USD)"])).sum()
-                daily_change_pct = (daily_change_usd / (data_df["Quantity"] * data_df["Prev Close (USD)"]).sum()) if (data_df["Quantity"] * data_df["Prev Close (USD)"]).sum() > 0 else 0.0
-
-                # UI: Portfolio Header with Delta Capsule
-                col_title, col_delta = st.columns([3, 1])
-                with col_title:
-                    st.metric("Valor Total de Cartera (USD)", f"${total_value:,.2f}", delta=f"${total_result:,.2f} ({total_result_pct:+.2%})")
-                
-                with col_delta:
-                    # Daily Variation "Capsule"
-                    color = "#28a745" if daily_change_usd >= 0 else "#dc3545"
-                    symbol = "▲" if daily_change_usd >= 0 else "▼"
-                    st.markdown(
-                        f"""
-                        <div style="background-color: {color}; color: white; padding: 10px 15px; border-radius: 20px; text-align: center; margin-top: 15px;">
-                            <span style="font-weight: bold; font-size: 0.9em;">ACTUALIZACIÓN DIARIA</span><br>
-                            <span style="font-size: 1.2em;">{symbol} ${abs(daily_change_usd):,.2f} ({daily_change_pct:+.2%})</span>
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-                
-                st.subheader("Desglose Detallado")
-                
-                # Prepare display dataframe using the RAW transactions (df)
-                # Apply current prices to EACH transaction
-                breakdown_df = df.copy()
-                breakdown_df["Type"] = "Compra" # Label for visual consistency
-                breakdown_df["Current Price (USD)"] = breakdown_df["Ticker"].map(st.session_state["Current Price (USD)"]).fillna(0.0)
-                breakdown_df["Updated Value (USD)"] = breakdown_df["Quantity"] * breakdown_df["Current Price (USD)"]
-                breakdown_df["Result ($)"] = breakdown_df["Updated Value (USD)"] - breakdown_df["Total_Cost_USD"]
-                breakdown_df["Result (%)"] = breakdown_df.apply(
-                    lambda row: (row["Updated Value (USD)"] / row["Total_Cost_USD"] - 1) if row["Total_Cost_USD"] > 0 else 0.0,
-                    axis=1
-                )
-
-                # Append Earnings to the detailed breakdown
-                if not df_earn.empty:
-                    earn_display = df_earn.copy()
-                    # Standardize columns to match breakdown_df
-                    earn_display = earn_display.rename(columns={"Type": "Benefit_Type"})
-                    earn_display["Type"] = earn_display["Benefit_Type"]
-                    earn_display["Platform"] = "Varios" # Benefit is global or from many invs
-                    earn_display["Quantity"] = 0.0
-                    earn_display["Price"] = 0.0
-                    earn_display["Total_Cost_USD"] = -earn_display["Cap_Red_USD"] # Negative cost = reduction
-                    earn_display["Current Price (USD)"] = 0.0
-                    earn_display["Updated Value (USD)"] = earn_display["Amount_USD"]
-                    earn_display["Result ($)"] = earn_display["Amount_USD"] # Direct result
-                    earn_display["Result (%)"] = 0.0 # N/A for individual earnings
-                    
-                    breakdown_df = pd.concat([breakdown_df, earn_display], ignore_index=True)
-
-                # Select and format columns for display
-                display_cols = ["Date", "Platform", "Ticker", "Type", "Quantity", "Price", "Currency", "Total_Cost_USD", "Current Price (USD)", "Updated Value (USD)", "Result ($)", "Result (%)"]
-                display_df = breakdown_df[display_cols].copy()
-
-                # Format Date for display
-                display_df["Date"] = pd.to_datetime(display_df["Date"]).dt.date
-                
-                # Format numeric columns as strings
-                display_df["Quantity"] = display_df["Quantity"].apply(lambda x: f"{x:,.6f}")
-                display_df["Price"] = display_df["Price"].apply(lambda x: f"{x:,.2f}")
-                display_df["Total_Cost_USD"] = display_df["Total_Cost_USD"].apply(lambda x: f"{x:,.2f}")
-                display_df["Current Price (USD)"] = display_df["Current Price (USD)"].apply(lambda x: f"{x:,.6f}")
-                display_df["Updated Value (USD)"] = display_df["Updated Value (USD)"].apply(lambda x: f"{x:,.2f}")
-                display_df["Result ($)"] = display_df["Result ($)"].apply(lambda x: f"{x:+,.2f}")
-                display_df["Result (%)"] = display_df["Result (%)"].apply(lambda x: f"{x:+.2%}")
-                
-                # Create a total row
-                total_row = pd.DataFrame([{
-                    "Date": "TOTAL",
-                    "Platform": "",
-                    "Ticker": "",
-                    "Quantity": "", 
-                    "Price": "",
-                    "Currency": "",
-                    "Total_Cost_USD": f"{total_cost:,.2f}",
-                    "Current Price (USD)": "",
-                    "Updated Value (USD)": f"{total_value:,.2f}",
-                    "Result ($)": f"{total_result:+,.2f}",
-                    "Result (%)": f"{total_result_pct:+.2%}"
+            # --- 4. Main Content Rendering ---
+            if choice == "Dashboard":
+                edit_cols = ["Platform", "Ticker", "Quantity", "Total_Cost", "Avg Buy Price", "Current Price (USD)", "Updated Value (USD)", "Day Chg ($)", "Day Chg (%)", "Result ($)", "Result (%)"]
+                total_row_ed = pd.DataFrame([{
+                    "Platform": "TOTAL", "Ticker": "", "Quantity": "", 
+                    "Total_Cost": f"{grouped_df['Total_Cost'].sum():,.2f}", "Avg Buy Price": "",
+                    "Current Price (USD)": "", "Updated Value (USD)": f"{total_val:,.2f}",
+                    "Day Chg ($)": f"{day_chg_u:+,.2f}", "Day Chg (%)": f"{day_chg_p:+.2%}",
+                    "Result ($)": f"{total_res:+,.2f}", "Result (%)": f"{total_res_pct:+.2%}"
                 }])
+                df_ed = grouped_df[edit_cols].copy()
+                for c in ["Quantity", "Total_Cost", "Avg Buy Price", "Updated Value (USD)", "Day Chg ($)", "Result ($)"]:
+                    df_ed[c] = df_ed[c].apply(lambda x: f"{x:,.6f}" if "Quantity" in c else f"{x:+,.2f}" if "Chg" in c or "Result" in c else f"{x:,.2f}")
+                df_ed["Day Chg (%)"] = df_ed["Day Chg (%)"].apply(lambda x: f"{x:+.2%}")
+                df_ed = pd.concat([df_ed, total_row_ed], ignore_index=True)
+
+                edited_df = st.data_editor(df_ed, column_config={
+                    "Platform": st.column_config.TextColumn("Plataforma", disabled=True),
+                    "Current Price (USD)": st.column_config.TextColumn("Precio Actual (USD)"),
+                    "Quantity": st.column_config.TextColumn("Cantidad", disabled=True),
+                    "Total_Cost": st.column_config.TextColumn("Costo Base", disabled=True),
+                    "Result (%)": st.column_config.TextColumn("Resultado (%)", disabled=True)
+                }, hide_index=True, use_container_width=True)
+
+                if not edited_df.empty:
+                    sync = False
+                    for idx, r in edited_df.iterrows():
+                        if r["Platform"] == "TOTAL": continue
+                        t = r["Ticker"]
+                        np = utils.safe_float(str(r["Current Price (USD)"]))
+                        if st.session_state["Current Price (USD)"].get(t) != np:
+                            st.session_state["Current Price (USD)"][t] = np
+                            sync = True
+                    if sync: st.rerun()
+
+            elif choice == "Detalle":
+                # Detailed breakdown table
+                b_df = df.copy()
+                b_df["Type"] = "Compra"
+                b_df["Current Price (USD)"] = b_df["Ticker"].map(st.session_state["Current Price (USD)"]).fillna(0.0)
+                b_df["Updated Value (USD)"] = b_df["Quantity"] * b_df["Current Price (USD)"]
+                b_df["Result ($)"] = b_df["Updated Value (USD)"] - b_df["Total_Cost_USD"]
+                b_df["Result (%)"] = b_df.apply(lambda r: (r["Updated Value (USD)"] / r["Total_Cost_USD"] - 1) if r["Total_Cost_USD"] > 0 else 0.0, axis=1)
                 
-                display_df = pd.concat([display_df, total_row], ignore_index=True)
+                disp_c = ["Date", "Platform", "Ticker", "Type", "Quantity", "Price", "Currency", "Total_Cost_USD", "Current Price (USD)", "Updated Value (USD)", "Result ($)", "Result (%)"]
+                if not df_earn.empty:
+                    e_d = df_earn.copy()
+                    e_d["Quantity"], e_d["Price"], e_d["Current Price (USD)"], e_d["Result (%)"] = 0.0, 0.0, 0.0, 0.0
+                    e_d["Total_Cost_USD"] = -e_d["Cap_Red_USD"]
+                    e_d["Updated Value (USD)"] = e_d["Amount_USD"]
+                    e_d["Result ($)"] = e_d["Amount_USD"]
+                    b_df = pd.concat([b_df, e_d[disp_c]], ignore_index=True)
                 
-                st.dataframe(
-                    display_df,
-                    use_container_width=True,
-                    hide_index=True
-                )
+                d_df = b_df[disp_c].copy()
+                d_df["Date"] = pd.to_datetime(d_df["Date"]).dt.date
+                for c in ["Total_Cost_USD", "Updated Value (USD)", "Result ($)"]:
+                    d_df[c] = d_df[c].apply(lambda x: f"{x:+,.2f}" if "Result ($)" in c else f"{x:,.2f}")
+                d_df["Result (%)"] = d_df["Result (%)"].apply(lambda x: f"{x:+.2%}")
                 
-                # --- NEW: Portfolio Progress Chart ---
+                tr = pd.DataFrame([{"Date": "TOTAL", "Platform": "", "Ticker": "", "Quantity": "", "Price": "", "Currency": "",
+                                    "Total_Cost_USD": f"{grouped_df['Total_Cost'].sum():,.2f}", "Current Price (USD)": "",
+                                    "Updated Value (USD)": f"{total_val:,.2f}", "Result ($)": f"{total_res:+,.2f}",
+                                    "Result (%)": f"{total_res_pct:+.2%}"}])
+                st.dataframe(pd.concat([d_df, tr], ignore_index=True), use_container_width=True, hide_index=True)
+
+                # Charts
                 st.divider()
                 st.subheader("📈 Evolución de Cartera")
-                
-                with st.spinner("Calculando progreso histórico..."):
-                    try:
-                        # 1. Prepare Daily Timeline
-                        df["Date"] = pd.to_datetime(df["Date"])
-                        min_date = df["Date"].min()
-                        today = datetime.date.today()
-                        date_range = pd.date_range(start=min_date, end=today, freq="D")
-                        
-                        # 2. Get Historical Prices
-                        # Get unique tickers and their sources
-                        unique_tickers = df["Ticker"].unique()
-                        tickers_to_fetch = {}
-                        for t in unique_tickers:
-                            info = ticker_config.get(t, {})
-                            tickers_to_fetch[t] = info.get("source", "Manual") if isinstance(info, dict) else info
-                        
-                        # Add ARS/USD for conversion
-                        # Note: We use ARSUSD=X or just calculate a constant if not found
-                        # To keep it simple and robust, let's fetch it if there are ARS assets
-                        has_ars = not df[df["Currency"] == "ARS"].empty
-                        if has_ars:
-                            tickers_to_fetch["ARS_USD"] = "Global" # Dummy source for helper
-                            
-                        # Fetch
-                        historical_prices = md.get_historical_prices(tickers_to_fetch, min_date)
-                        
-                        # Fix ARS_USD if dummy used
-                        if "ARS_USD" in historical_prices.columns:
-                            # Yahoo returns ARS per USD usually for ARS=X, check scale
-                            # Actually ARSUSD=X is USD per 1 ARS. 
-                            # Let's assume we want to convert ARS cost to USD.
-                            pass
+                try:
+                    df["Date"] = pd.to_datetime(df["Date"])
+                    min_d = df["Date"].min()
+                    dr = pd.date_range(start=min_d, end=datetime.date.today(), freq="D")
+                    hp = md.get_historical_prices({t: ticker_config.get(t, {}).get("source", "Manual") for t in df["Ticker"].unique()}, min_d)
+                    cd = []
+                    for d in dr:
+                        m = df["Date"] <= d
+                        cf = df[m]
+                        if cf.empty: continue
+                        ic = cf["Total_Cost_USD"].sum()
+                        re, cr = 0.0, 0.0
+                        if not df_earn.empty:
+                            me = pd.to_datetime(df_earn["Date"]) <= d
+                            re, cr = df_earn[me]["Amount_USD"].sum(), df_earn[me]["Cap_Red_USD"].sum()
+                        mv = re
+                        for t, q in cf.groupby("Ticker")["Quantity"].sum().items():
+                            if t in hp.columns:
+                                ph = hp[t].loc[:d]
+                                p = ph.iloc[-1] if not ph.empty else 0
+                                mv += q * (p if not pd.isna(p) else 0)
+                            else: mv += q * st.session_state["Current Price (USD)"].get(t, 0)
+                        cd.append({"Date": d, "Invested Capital (USD)": ic - cr, "Market Value (USD)": mv})
+                    if cd:
+                        st.line_chart(pd.DataFrame(cd).set_index("Date"))
+                except Exception as e: st.error(f"Error gráfico: {e}")
 
-                        # 3. Calculate Daily Status
-                        # Pre-convert transactions to USD cost (using current MEP for simplicity if history fails)
-                        mep_rate = dolar_rates.get("MEP", 1.0)
-                        def to_usd(row):
-                            if row["Currency"] in ["USD", "USDT"]:
-                                return row["Total_Cost"]
-                            return row["Total_Cost"] / mep_rate
-                        
-                        df["Total_Cost_USD"] = df.apply(to_usd, axis=1)
-                        
-                        chart_data = []
-                        for d in date_range:
-                            # Transactions up to this day
-                            mask = df["Date"] <= d
-                            current_df = df[mask]
-                            
-                            if current_df.empty:
-                                continue
-                                
-                            invested_capital = current_df["Total_Cost_USD"].sum()
-                            
-                            # Realized earnings up to this day
-                            realized_earnings = 0.0
-                            cap_reduction = 0.0
-                            if not df_earn.empty:
-                                mask_earn = pd.to_datetime(df_earn["Date"]) <= d
-                                realized_earnings = df_earn[mask_earn]["Amount_USD"].sum()
-                                cap_reduction = df_earn[mask_earn]["Cap_Red_USD"].sum()
-                            
-                            # Market Value
-                            market_value = realized_earnings # Start with earnings
-                            # Group by ticker to get current cumulative quantity
-                            holdings = current_df.groupby("Ticker")["Quantity"].sum()
-                            
-                            # Adjust invested capital by reduction
-                            invested_capital = invested_capital - cap_reduction
-                            
-                            for t, qty in holdings.items():
-                                if t in historical_prices.columns:
-                                    # Get price for that day or last available
-                                    day_prices = historical_prices[t].loc[:d]
-                                    if not day_prices.empty:
-                                        p = day_prices.iloc[-1]
-                                        if pd.isna(p):
-                                            # If still NaN, try to use the last non-nan price in the series
-                                            p = day_prices.dropna().iloc[-1] if not day_prices.dropna().empty else 0.0
-                                        market_value += qty * p
-                                    else:
-                                        # Fallback to cost basis if no price info yet to avoid NaN gap
-                                        market_value += current_df[current_df["Ticker"] == t]["Total_Cost_USD"].sum()
-                                else:
-                                    # Fallback to last known session price if it's today
-                                    if d.date() == today:
-                                         market_value += qty * st.session_state["Current Price (USD)"].get(t, 0.0)
-                                    else:
-                                        # Fallback to cost basis for historical days without price info
-                                        market_value += current_df[current_df["Ticker"] == t]["Total_Cost_USD"].sum()
-
-                            chart_data.append({
-                                "Date": d,
-                                "Invested Capital (USD)": invested_capital,
-                                "Market Value (USD)": market_value
-                            })
-                            
-                        if chart_data:
-                            history_df = pd.DataFrame(chart_data).set_index("Date")
-                            # Handle any remaining NaNs in the final dataframe
-                            history_df = history_df.fillna(method='ffill').fillna(0)
-                            st.line_chart(history_df, use_container_width=True)
-                            
-                            # Summary metric for the chart
-                            last_market_val = chart_data[-1]["Market Value (USD)"]
-                            last_invested = chart_data[-1]["Invested Capital (USD)"]
-                            
-                            # Ensure we don't show NaN if values are missing
-                            if pd.isna(last_market_val) or pd.isna(last_invested):
-                                # Recalculate from history_df to be safe
-                                last_market_val = history_df["Market Value (USD)"].iloc[-1]
-                                last_invested = history_df["Invested Capital (USD)"].iloc[-1]
-
-                            total_gain = last_market_val - last_invested
-                            total_gain_pct = (last_market_val / last_invested - 1) if last_invested > 0 else 0
-                            
-                            st.caption(f"Resultado histórico: **${total_gain:,.2f} ({total_gain_pct:+.2%})** con respecto a la inversión total.")
-                        else:
-                            st.info("No hay suficientes datos históricos para generar el gráfico.")
-                        
-                    except Exception as e:
-                        st.error(f"Error al generar el gráfico: {e}")
-
-                # --- NEW: Summary by Platform ---
+                # Summary by Platform
                 st.divider()
                 st.subheader("📊 Resumen por Plataforma")
-                
-                # Use data_df which has the updated USD values
-                # data_df was prepared around line 380-384
-                if not data_df.empty:
-                    platform_summary = data_df.groupby("Platform")["Updated Value (USD)"].sum().reset_index()
-                    platform_summary.columns = ["Plataforma", "Valor en Dolares"]
-                    
-                    # Sort by value descending
-                    platform_summary = platform_summary.sort_values(by="Valor en Dolares", ascending=False)
-                    
-                    # Add Total Row
-                    total_val = platform_summary["Valor en Dolares"].sum()
-                    total_row = pd.DataFrame([{"Plataforma": "TOTAL", "Valor en Dolares": total_val}])
-                    platform_summary = pd.concat([platform_summary, total_row], ignore_index=True)
-
-                    # Format for display
-                    display_platform_summary = platform_summary.copy()
-                    display_platform_summary["Valor en Dolares"] = display_platform_summary["Valor en Dolares"].apply(lambda x: f"${x:,.2f}")
-                    
-                    st.dataframe(
-                        display_platform_summary,
-                        use_container_width=True,
-                        hide_index=True
-                    )
-                else:
-                    st.info("No hay datos suficientes para mostrar el resumen por plataforma.")
+                ps = grouped_df.groupby("Platform")["Updated Value (USD)"].sum().reset_index()
+                ps.columns = ["Plataforma", "Valor en Dolares"]
+                ps = ps.sort_values(by="Valor en Dolares", ascending=False)
+                t_ps = pd.DataFrame([{"Plataforma": "TOTAL", "Valor en Dolares": ps["Valor en Dolares"].sum()}])
+                ps_f = pd.concat([ps, t_ps], ignore_index=True)
+                ps_f["Valor en Dolares"] = ps_f["Valor en Dolares"].apply(lambda x: f"${x:,.2f}")
+                st.dataframe(ps_f, use_container_width=True, hide_index=True)
 
         else:
             st.info("No investments found. Go to 'New Entry' to add some.")
