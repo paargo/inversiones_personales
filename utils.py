@@ -27,8 +27,20 @@ def safe_float(value):
             return 0.0
 
 def get_secret(key):
-    """Safely get a secret from st.secrets to avoid StreamlitSecretNotFoundError"""
+    """Safely get a secret from st.secrets to avoid StreamlitSecretNotFoundError.
+    Converts proxy objects recursively to plain Python objects to prevent caching recursion issues.
+    """
+    def _clean(obj):
+        if hasattr(obj, "to_dict"):
+            return _clean(obj.to_dict())
+        if isinstance(obj, dict) or (hasattr(obj, "__getitem__") and hasattr(obj, "keys")):
+            return {str(k): _clean(obj[k]) for k in obj.keys()}
+        if isinstance(obj, list):
+            return [_clean(i) for i in obj]
+        return obj
+
     try:
-        return st.secrets.get(key)
+        val = st.secrets.get(key)
+        return _clean(val) if val is not None else None
     except Exception:
         return None
