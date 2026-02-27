@@ -50,6 +50,7 @@ def main():
         btc_var = (btc_price / btc_prev_close - 1)
         col_btc.markdown(metric_capsule(btc_var), unsafe_allow_html=True)
     
+    st.caption("ℹ️ Los valores de Dólar (MEP, CCL, Blue) se actualizan automáticamente de Lunes a Viernes entre las 9:00 y 18:00 hs.")
     st.divider()
 
     # Sidebar: connection status check
@@ -103,7 +104,7 @@ def main():
     if "menu_choice" not in st.session_state:
         st.session_state["menu_choice"] = "Dashboard"
 
-    menu = ["Dashboard", "Ingresar Compra", "Detalle", "Ingresar Beneficios", "Configuración"]
+    menu = ["Dashboard", "Detalle", "Ingresar Compra", "Ingresar Beneficios", "Configuración"]
     
     # Render banners
     for item in menu:
@@ -513,6 +514,7 @@ def main():
                     hp = md.get_historical_prices({t: ticker_config.get(t, {}).get("source", "Manual") for t in df["Ticker"].unique()}, min_d)
                     cd = []
                     for d in dr:
+                        is_today = d.date() == datetime.date.today()
                         m = df["Date"] <= d
                         cf = df[m]
                         if cf.empty: continue
@@ -523,11 +525,19 @@ def main():
                             re, cr = df_earn[me]["Amount_USD"].sum(), df_earn[me]["Cap_Red_USD"].sum()
                         mv = re
                         for t, q in cf.groupby("Ticker")["Quantity"].sum().items():
-                            if t in hp.columns:
+                            # For today, prioritize real-time prices from session_state
+                            if is_today and t in st.session_state.get("Current Price (USD)", {}):
+                                p = st.session_state["Current Price (USD)"][t]
+                                mv += q * p
+                            elif t in hp.columns:
                                 ph = hp[t].loc[:d]
                                 p = ph.iloc[-1] if not ph.empty else 0
+                                # Fallback to session_state if historical is NaN for today
+                                if pd.isna(p) and is_today:
+                                    p = st.session_state.get("Current Price (USD)", {}).get(t, 0)
                                 mv += q * (p if not pd.isna(p) else 0)
-                            else: mv += q * st.session_state["Current Price (USD)"].get(t, 0)
+                            else: 
+                                mv += q * st.session_state["Current Price (USD)"].get(t, 0)
                         cd.append({"Date": d, "Invested Capital (USD)": ic - cr, "Market Value (USD)": mv})
                     if cd:
                         st.line_chart(pd.DataFrame(cd).set_index("Date"))

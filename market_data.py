@@ -2,10 +2,49 @@ import requests
 import yfinance as yf
 import pandas as pd
 import streamlit as st
+import datetime
+import json
+import os
+
+MARKET_CACHE_FILE = "market_cache.json"
+
+def is_market_hours():
+    """Check if current time is Mon-Fri, 9:00 - 18:00 Argentina time (UTC-3)"""
+    # Metadata confirms current time is already Argentina time (-03:00)
+    now = datetime.datetime.now()
+    # weekday() is 0 for Monday, 6 for Sunday
+    is_weekday = 0 <= now.weekday() <= 4
+    is_working_hour = 9 <= now.hour < 18
+    return is_weekday and is_working_hour
+
+def save_market_cache(data):
+    try:
+        with open(MARKET_CACHE_FILE, "w") as f:
+            json.dump(data, f)
+    except:
+        pass
+
+def load_market_cache():
+    if os.path.exists(MARKET_CACHE_FILE):
+        try:
+            with open(MARKET_CACHE_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return None
+    return None
 
 @st.cache_data(ttl=1800) # Cache for 30 minutes
 def get_dolar_rates():
     """Fetch MEP, CCL and Cripto rates from dolarapi.com + Variation proxy"""
+    
+    # Check if we should update
+    in_hours = is_market_hours()
+    cached_data = load_market_cache()
+    
+    # If not in hours and we have cached data, return it to save performance/limit API calls
+    if not in_hours and cached_data:
+        return cached_data
+
     rates = {"MEP": 0.0, "CCL": 0.0, "Cripto": 0.0, "Blue": 0.0, "variation": 0.0}
     try:
         # Fetch MEP
@@ -41,8 +80,16 @@ def get_dolar_rates():
         except:
             pass
             
+        # Save successful fetch to local cache for off-hours
+        if rates["MEP"] > 0:
+            save_market_cache(rates)
+            
     except Exception as e:
         print(f"Error fetching FX rates: {e}")
+        # If error but we have cache, use it
+        if cached_data:
+            return cached_data
+            
     return rates
 
 def get_market_price(ticker, source):
