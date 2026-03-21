@@ -394,7 +394,8 @@ def main():
             # --- 2. Top UI: Metrics and Delta ---
             col_met, col_var = st.columns([3, 1])
             with col_met:
-                st.metric("Valor Total de Cartera (USD)", f"${total_val:,.2f}", delta=f"${total_res:,.2f} ({total_res_pct:+.2%})")
+                delta_str = f"{'+$' if total_res >= 0 else '-$'}{abs(total_res):,.2f} ({total_res_pct:+.2%})"
+                st.metric("Valor Total de Cartera (USD)", f"${total_val:,.2f}", delta=delta_str)
             with col_var:
                 color_v = "#28a745" if day_chg_u >= 0 else "#dc3545"
                 sym_v = "▲" if day_chg_u >= 0 else "▼"
@@ -415,10 +416,14 @@ def main():
                 should_update = st.button("🔄 Actualizar Precios", use_container_width=True)
 
             # Auto-update logic
-            st_autorefresh(interval=60 * 1000, key="price_update_refresh")
-            if st.session_state["last_update_time"]:
-                el = (datetime.datetime.now() - st.session_state["last_update_time"]).total_seconds() / 60
-                if el >= PRICE_UPDATE_INTERVAL_MINUTES: should_update = True
+            settings = db.load_settings()
+            auto_update_enabled = settings.get("auto_update_enabled", True)
+            
+            if auto_update_enabled:
+                st_autorefresh(interval=60 * 1000, key="price_update_refresh")
+                if st.session_state["last_update_time"]:
+                    el = (datetime.datetime.now() - st.session_state["last_update_time"]).total_seconds() / 60
+                    if el >= PRICE_UPDATE_INTERVAL_MINUTES: should_update = True
             if not st.session_state.get("prices_updated", False) and not grouped_df.empty: should_update = True
 
             if should_update:
@@ -560,6 +565,20 @@ def main():
     elif choice == "Configuración":
         st.subheader("⚙️ Configuración")
         settings = db.load_settings()
+        
+        # 0. Ajustes Generales
+        st.markdown("### Ajustes Generales")
+        
+        current_auto_update = settings.get("auto_update_enabled", True)
+        new_auto_update = st.toggle("Habilitar actualización automática de precios", value=current_auto_update)
+        
+        if new_auto_update != current_auto_update:
+            settings["auto_update_enabled"] = new_auto_update
+            db.save_settings(settings)
+            st.success("Preferencia de actualización guardada.")
+            st.rerun()
+
+        st.divider()
         
         # 1. API Integration Settings
         st.markdown("### Integración de API")
