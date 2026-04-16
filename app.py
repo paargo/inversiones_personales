@@ -517,7 +517,9 @@ def main():
                     fred_key = settings.get("fred_api_key")
                     if fred_key:
                         cpi_raw = md.get_us_cpi(fred_key)
-                        if cpi_raw:
+                        if not cpi_raw:
+                            st.warning("⚠️ No se pudieron obtener los datos de la API de FRED (posible API Key inválida o límite de peticiones).")
+                        else:
                             cpi_series = pd.Series(cpi_raw)
                             cpi_series.index = pd.to_datetime(cpi_series.index)
                             cpi_series = cpi_series.sort_index()
@@ -574,7 +576,7 @@ def main():
 
                                     cd_item["Capital Ajustado (Inflación EEUU)"] = adj_ic - adj_cr
                             except Exception as cpi_e:
-                                pass
+                                print(f"Error procesando CPI para {d}: {cpi_e}")
                                 
                         cd.append(cd_item)
                     
@@ -650,7 +652,6 @@ def main():
             settings["fred_api_key"] = fred_key
             db.save_settings(settings)
             st.success("¡FRED API Key guardada exitosamente!")
-            st.rerun()
 
 
         st.divider()

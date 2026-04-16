@@ -3,6 +3,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
 import streamlit as st
 import utils
+import json
+import os
 
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
@@ -163,11 +165,22 @@ def load_settings():
             }
     settings["ticker_config"] = config
     
+    # Load other settings from local JSON if exists
+    if os.path.exists("settings.json"):
+        try:
+            with open("settings.json", "r") as f:
+                local_settings = json.load(f)
+                if "fred_api_key" in local_settings:
+                    settings["fred_api_key"] = local_settings["fred_api_key"]
+                if "auto_update_enabled" in local_settings:
+                    settings["auto_update_enabled"] = local_settings["auto_update_enabled"]
+        except Exception as e:
+            st.error(f"Error cargando settings.json local: {e}")
+            
     return settings
 
 def save_settings(settings):
     st.cache_data.clear()
-    # Only saves Ticker Config to Sheet. API keys must be managed in secrets.toml/cloud dashboard.
     sh = get_db_connection()
     _, ws_settings = init_worksheets(sh)
     
@@ -187,13 +200,33 @@ def save_settings(settings):
                 "Data Source": info,
                 "Type": "Acción ARG"
             })
-    
+            
     df_config = pd.DataFrame(config_data)
-    
+
     ws_settings.clear()
     ws_settings.append_row(["Ticker", "Data Source", "Type"])
     if not df_config.empty:
         ws_settings.append_rows(df_config.values.tolist())
+            
+    # Save extra settings to local JSON
+    local_settings = {}
+    if os.path.exists("settings.json"):
+        try:
+            with open("settings.json", "r") as f:
+                local_settings = json.load(f)
+        except:
+            pass
+            
+    if "fred_api_key" in settings:
+        local_settings["fred_api_key"] = settings["fred_api_key"]
+    if "auto_update_enabled" in settings:
+        local_settings["auto_update_enabled"] = settings["auto_update_enabled"]
+        
+    try:
+        with open("settings.json", "w") as f:
+            json.dump(local_settings, f, indent=4)
+    except Exception as e:
+        print(f"Error guardando settings extras: {e}")
 
 @st.cache_data(ttl=600)
 def load_platforms():
