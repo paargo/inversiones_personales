@@ -194,3 +194,34 @@ def get_historical_prices(tickers_with_sources, start_date):
             print(f"Error fetching historical for {ticker}: {e}")
             
     return all_data
+
+@st.cache_data(ttl=86400) # Cache for 24 hours
+def get_us_cpi(api_key):
+    """
+    Fetch US Consumer Price Index (CPIAUCSL) from FRED API.
+    Requires an API key from https://fred.stlouisfed.org/docs/api/api_key.html
+    Returns a dictionary of date strings (YYYY-MM-DD) to float values.
+    """
+    if not api_key:
+        return {}
+        
+    try:
+        url = f"https://api.stlouisfed.org/fred/series/observations?series_id=CPIAUCSL&api_key={api_key}&file_type=json"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            observations = data.get("observations", [])
+            
+            cpi_data = {}
+            for obs in observations:
+                date = obs.get("date")
+                val = obs.get("value")
+                if val != "." and date:
+                    cpi_data[date] = float(val)
+            return cpi_data
+        else:
+            print(f"Error fetching CPI from FRED. Status code: {resp.status_code}")
+            return {}
+    except Exception as e:
+        print(f"Exception fetching CPI: {e}")
+        return {}

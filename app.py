@@ -21,7 +21,7 @@ def main():
     # Fetch BTC price for the header
     btc_price, _, btc_prev_close = md.get_market_price("BTC", "Binance API")
     
-    col_mep, col_ccl, col_blue, col_crypto, col_btc = st.columns(5)
+    col_mep, col_blue, col_crypto, col_btc = st.columns(4)
     
     # Helper for small variation capsules
     def metric_capsule(variation):
@@ -35,9 +35,6 @@ def main():
 
     col_mep.metric("Dólar MEP", f"${dolar_rates['MEP']:,.2f}")
     col_mep.markdown(metric_capsule(dolar_rates.get("variation", 0.0)), unsafe_allow_html=True)
-    
-    col_ccl.metric("Dólar CCL", f"${dolar_rates['CCL']:,.2f}")
-    col_ccl.markdown(metric_capsule(dolar_rates.get("variation", 0.0)), unsafe_allow_html=True)
 
     col_blue.metric("Dólar Blue", f"${dolar_rates['Blue']:,.2f}")
     col_blue.markdown(metric_capsule(dolar_rates.get("variation", 0.0)), unsafe_allow_html=True)
@@ -50,7 +47,7 @@ def main():
         btc_var = (btc_price / btc_prev_close - 1)
         col_btc.markdown(metric_capsule(btc_var), unsafe_allow_html=True)
     
-    st.caption("ℹ️ Los valores de Dólar (MEP, CCL, Blue) se actualizan automáticamente de Lunes a Viernes entre las 9:00 y 18:00 hs.")
+    st.caption("ℹ️ Los valores de Dólar (MEP, Blue) se actualizan automáticamente de Lunes a Viernes entre las 9:00 y 18:00 hs.")
     st.divider()
 
     # Sidebar: connection status check
@@ -446,22 +443,20 @@ def main():
 
             # --- 4. Main Content Rendering ---
             if choice == "Dashboard":
-                edit_cols = ["Platform", "Ticker", "Quantity", "Total_Cost", "Avg Buy Price", "Current Price (USD)", "Updated Value (USD)", "Day Chg ($)", "Day Chg (%)", "Result ($)", "Result (%)"]
+                edit_cols = ["Ticker", "Result ($)", "Result (%)", "Day Chg (%)", "Quantity", "Total_Cost", "Avg Buy Price", "Current Price (USD)", "Updated Value (USD)"]
                 total_row_ed = pd.DataFrame([{
-                    "Platform": "TOTAL", "Ticker": "", "Quantity": "", 
-                    "Total_Cost": f"{grouped_df['Total_Cost'].sum():,.2f}", "Avg Buy Price": "",
-                    "Current Price (USD)": "", "Updated Value (USD)": f"{total_val:,.2f}",
-                    "Day Chg ($)": f"{day_chg_u:+,.2f}", "Day Chg (%)": f"{day_chg_p:+.2%}",
-                    "Result ($)": f"{total_res:+,.2f}", "Result (%)": f"{total_res_pct:+.2%}"
+                    "Ticker": "TOTAL", "Result ($)": f"{total_res:+,.2f}", "Result (%)": f"{total_res_pct:+.2%}", "Day Chg (%)": f"{day_chg_p:+.2%}",
+                    "Quantity": "", "Total_Cost": f"{grouped_df['Total_Cost'].sum():,.2f}", 
+                    "Avg Buy Price": "", "Current Price (USD)": "", 
+                    "Updated Value (USD)": f"{total_val:,.2f}"
                 }])
                 df_ed = grouped_df[edit_cols].copy()
-                for c in ["Quantity", "Total_Cost", "Avg Buy Price", "Updated Value (USD)", "Day Chg ($)", "Result ($)"]:
+                for c in ["Quantity", "Total_Cost", "Avg Buy Price", "Updated Value (USD)", "Result ($)"]:
                     df_ed[c] = df_ed[c].apply(lambda x: f"{x:,.6f}" if "Quantity" in c else f"{x:+,.2f}" if "Chg" in c or "Result" in c else f"{x:,.2f}")
                 df_ed["Day Chg (%)"] = df_ed["Day Chg (%)"].apply(lambda x: f"{x:+.2%}")
                 df_ed = pd.concat([df_ed, total_row_ed], ignore_index=True)
 
                 edited_df = st.data_editor(df_ed, column_config={
-                    "Platform": st.column_config.TextColumn("Plataforma", disabled=True),
                     "Current Price (USD)": st.column_config.TextColumn("Precio Actual (USD)"),
                     "Quantity": st.column_config.TextColumn("Cantidad", disabled=True),
                     "Total_Cost": st.column_config.TextColumn("Costo Base", disabled=True),
@@ -471,7 +466,7 @@ def main():
                 if not edited_df.empty:
                     sync = False
                     for idx, r in edited_df.iterrows():
-                        if r["Platform"] == "TOTAL": continue
+                        if r["Ticker"] == "TOTAL": continue
                         t = r["Ticker"]
                         np = utils.safe_float(str(r["Current Price (USD)"]))
                         if st.session_state["Current Price (USD)"].get(t) != np:
@@ -517,6 +512,16 @@ def main():
                     min_d = df["Date"].min()
                     dr = pd.date_range(start=min_d, end=datetime.date.today(), freq="D")
                     hp = md.get_historical_prices({t: ticker_config.get(t, {}).get("source", "Manual") for t in df["Ticker"].unique()}, min_d)
+                    
+                    cpi_series = None
+                    fred_key = settings.get("fred_api_key")
+                    if fred_key:
+                        cpi_raw = md.get_us_cpi(fred_key)
+                        if cpi_raw:
+                            cpi_series = pd.Series(cpi_raw)
+                            cpi_series.index = pd.to_datetime(cpi_series.index)
+                            cpi_series = cpi_series.sort_index()
+
                     cd = []
                     for d in dr:
                         is_today = d.date() == datetime.date.today()
@@ -543,9 +548,43 @@ def main():
                                 mv += q * (p if not pd.isna(p) else 0)
                             else: 
                                 mv += q * st.session_state["Current Price (USD)"].get(t, 0)
-                        cd.append({"Date": d, "Invested Capital (USD)": ic - cr, "Market Value (USD)": mv})
+                        cd_item = {"Date": d, "Invested Capital (USD)": ic - cr, "Market Value (USD)": mv}
+                        
+                        if cpi_series is not None and not cpi_series.empty:
+                            try:
+                                d_cpi_slice = cpi_series.loc[:d]
+                                if not d_cpi_slice.empty:
+                                    current_cpi = d_cpi_slice.iloc[-1]
+                                    adj_ic = 0.0
+                                    
+                                    for _, row in cf.iterrows():
+                                        inv_d = row["Date"]
+                                        inv_cpi_slice = cpi_series.loc[:inv_d]
+                                        inv_cpi = inv_cpi_slice.iloc[-1] if not inv_cpi_slice.empty else current_cpi
+                                        adj_ic += row["Total_Cost_USD"] * (current_cpi / inv_cpi)
+                                        
+                                    adj_cr = 0.0
+                                    if not df_earn.empty:
+                                        eff_earn = df_earn[pd.to_datetime(df_earn["Date"]) <= d]
+                                        for _, erow in eff_earn.iterrows():
+                                            e_d = erow["Date"]
+                                            e_cpi_slice = cpi_series.loc[:pd.to_datetime(e_d)]
+                                            e_cpi = e_cpi_slice.iloc[-1] if not e_cpi_slice.empty else current_cpi
+                                            adj_cr += erow["Cap_Red_USD"] * (current_cpi / e_cpi)
+
+                                    cd_item["Capital Ajustado (Inflación EEUU)"] = adj_ic - adj_cr
+                            except Exception as cpi_e:
+                                pass
+                                
+                        cd.append(cd_item)
+                    
                     if cd:
-                        st.line_chart(pd.DataFrame(cd).set_index("Date"))
+                        chart_df = pd.DataFrame(cd).set_index("Date")
+                        chart_df = chart_df.rename(columns={
+                            "Invested Capital (USD)": "Capital Invertido Nominal",
+                            "Market Value (USD)": "Valor de Mercado"
+                        })
+                        st.line_chart(chart_df)
                 except Exception as e: st.error(f"Error gráfico: {e}")
 
                 # Summary by Platform
@@ -603,6 +642,15 @@ def main():
         api_keys = settings.get("api_keys", {})
         st.text_input("Binance Key", value="********" if api_keys.get("binance_key") else "", disabled=True)
         st.text_input("Binance Secret", value="********" if api_keys.get("binance_secret") else "", disabled=True)
+        
+        st.markdown("#### Inflación de Estados Unidos (FRED)")
+        st.info("Obtén tu API key gratis en: https://fred.stlouisfed.org/docs/api/api_key.html")
+        fred_key = st.text_input("FRED API Key", value=settings.get("fred_api_key", ""), type="password")
+        if st.button("Guardar FRED Key"):
+            settings["fred_api_key"] = fred_key
+            db.save_settings(settings)
+            st.success("¡FRED API Key guardada exitosamente!")
+            st.rerun()
 
 
         st.divider()
