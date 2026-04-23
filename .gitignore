@@ -15,3 +15,5 @@ settings.json
 env/
 venv/
 credentials.json
+market_history.sqlite
+.yfinance_cache/

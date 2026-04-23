@@ -26,6 +26,26 @@ CREATE TABLE IF NOT EXISTS indicator_configs (
     FOREIGN KEY (ticker_id) REFERENCES analyzed_tickers(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS market_ohlc_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker_id INTEGER NOT NULL,
+    timestamp TEXT NOT NULL,
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    volume REAL NOT NULL,
+    source TEXT NOT NULL DEFAULT 'mock',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(ticker_id, timestamp),
+    FOREIGN KEY (ticker_id) REFERENCES analyzed_tickers(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS sync_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 -- Example insertion
 INSERT INTO analyzed_tickers (symbol, market, asset_type, timeframe, is_active)
 VALUES ('AAPL', 'NYSE', 'stock', '1D', 1);
@@ -36,4 +56,18 @@ VALUES (
     '[10, 20, 100]',
     1,
     1
+);
+
+INSERT INTO market_ohlc_history (
+    ticker_id, timestamp, open, high, low, close, volume, source
+)
+VALUES (
+    1,
+    '2026-04-21T00:00:00Z',
+    180.50,
+    185.20,
+    179.80,
+    184.10,
+    52345000,
+    'mock'
 );

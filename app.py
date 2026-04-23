@@ -8,13 +8,126 @@ from streamlit_autorefresh import st_autorefresh
 import utils
 import database as db
 import market_data as md
+from analysis_models import AnalyzedTicker, IndicatorConfig
+from indicator_engine import (
+    IndicatorEngine,
+    IndicatorRepository,
+    IndicatorEngineError,
+    MissingIndicatorConfigError,
+    NoHistoricalDataError,
+)
+from market_history_service import (
+    HistoricalMarketDataService,
+    MockMarketDataProvider,
+    YFinanceMarketDataProvider,
+    SqliteMarketHistoryRepository,
+    OHLCBar,
+)
 
 # Configuration constants
 PRICE_UPDATE_INTERVAL_MINUTES = 30
 
+
+@st.cache_resource
+def get_history_service():
+    repository = SqliteMarketHistoryRepository("market_history.sqlite")
+    try:
+        provider = YFinanceMarketDataProvider()
+    except Exception as e:
+        st.warning(f"No se pudo inicializar el provider real, usando mock: {e}")
+        provider = MockMarketDataProvider()
+
+    return HistoricalMarketDataService(provider=provider, repository=repository)
+
+
+@st.cache_resource
+def get_indicator_engine():
+    history_service = get_history_service()
+    repository = IndicatorRepository("market_history.sqlite")
+    return IndicatorEngine(repository=repository, history_service=history_service)
+
+
+def bars_to_df(bars):
+    if not bars:
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+    normalized = []
+    for bar in bars:
+        if hasattr(bar, "to_row"):
+            normalized.append(bar.to_row())
+        elif isinstance(bar, dict):
+            normalized.append(bar)
+        else:
+            normalized.append({
+                "timestamp": getattr(bar, "timestamp", None),
+                "open": getattr(bar, "open", None),
+                "high": getattr(bar, "high", None),
+                "low": getattr(bar, "low", None),
+                "close": getattr(bar, "close", None),
+                "volume": getattr(bar, "volume", None),
+            })
+
+    df = pd.DataFrame(normalized)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    return df
+
+
+def _parse_iso_datetime(value):
+    if not value:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def run_history_auto_sync(settings):
+    """Run once per day when enabled, catching up any missed OHLC days."""
+    if not settings.get("ohlc_auto_update_enabled", False):
+        return
+
+    today = datetime.date.today()
+    last_check_key = "ohlc_auto_sync_checked_for"
+    if st.session_state.get(last_check_key) == str(today):
+        return
+
+    st.session_state[last_check_key] = str(today)
+
+    last_update = _parse_iso_datetime(settings.get("ohlc_last_update"))
+    if last_update and last_update.date() >= today:
+        return
+
+    service = get_history_service()
+    with st.spinner("Actualizando historicos OHLC automaticamente..."):
+        try:
+            result = service.sync_all_missing(end_date=today)
+            settings["ohlc_last_update"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            settings["ohlc_last_status"] = (
+                f"updated_tickers={result['updated_tickers']}; saved_bars={result['saved_bars']}; failed_tickers={result['failed_tickers']}"
+            )
+            db.save_settings(settings)
+            st.session_state["ohlc_last_auto_sync_result"] = result
+            if result["failed_tickers"] > 0:
+                st.warning(
+                    f"Actualizacion automatica parcial: {result['updated_tickers']} tickers, {result['saved_bars']} velas, {result['failed_tickers']} fallos."
+                )
+                if result["errors"]:
+                    st.caption(" | ".join(result["errors"]))
+            else:
+                st.success(
+                    f"Actualizacion automatica completada: {result['updated_tickers']} tickers, {result['saved_bars']} velas."
+                )
+        except Exception as e:
+            settings["ohlc_last_status"] = f"error={e}"
+            db.save_settings(settings)
+            st.session_state["ohlc_last_auto_sync_error"] = str(e)
+            st.error(f"No se pudo ejecutar la actualizacion automatica: {e}")
+
 def main():
     st.set_page_config(page_title="Control de Inversiones", layout="wide")
     st.title("💰 Control de Inversiones")
+    settings = db.load_settings()
+    run_history_auto_sync(settings)
 
     # 1. Global Market Header (Visible on all pages)
     dolar_rates = md.get_dolar_rates()
@@ -101,7 +214,7 @@ def main():
     if "menu_choice" not in st.session_state:
         st.session_state["menu_choice"] = "Dashboard"
 
-    menu = ["Dashboard", "Detalle", "Ingresar Compra", "Ingresar Beneficios", "Configuración"]
+    menu = ["Dashboard", "Detalle", "Ingresar Compra", "Ingresar Beneficios", "Consulta OHLC", "Indicadores", "Configuración"]
     
     # Render banners
     for item in menu:
@@ -603,6 +716,293 @@ def main():
         else:
             st.info("No investments found. Go to 'New Entry' to add some.")
 
+    elif choice == "Consulta OHLC":
+        st.subheader("Consulta de historicos OHLC")
+        st.caption("Investiga datos reales si el provider responde, consulta lo guardado y persiste la informacion en la base local.")
+
+        service = get_history_service()
+        provider_name = service.provider.__class__.__name__
+        st.info(f"Fuente activa: {provider_name}")
+        catalog = service.repository.list_tickers()
+        catalog_options = ["Nuevo ticker..."] + [
+            f"{row['symbol']} | {row['market']} | {row['timeframe']} ({row['asset_type']})"
+            for row in catalog
+        ]
+
+        selected_option = st.selectbox("Ticker disponible", catalog_options)
+
+        default_symbol = ""
+        default_market = "NYSE"
+        default_asset_type = "stock"
+        default_timeframe = "1D"
+        selected_row = None
+
+        if selected_option != "Nuevo ticker...":
+            selected_row = next(
+                row for row in catalog
+                if f"{row['symbol']} | {row['market']} | {row['timeframe']} ({row['asset_type']})" == selected_option
+            )
+            default_symbol = selected_row["symbol"]
+            default_market = selected_row["market"]
+            default_asset_type = selected_row["asset_type"]
+            default_timeframe = selected_row["timeframe"]
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            symbol = st.text_input("Symbol", value=default_symbol).strip().upper()
+            market_options = ["NYSE", "NASDAQ", "BYMA", "NASDAQGS", "CRYPTO"]
+            market = st.selectbox(
+                "Market",
+                market_options,
+                index=market_options.index(default_market) if default_market in market_options else 0,
+            )
+            asset_type_options = ["stock", "cedear", "bond", "etf", "on"]
+            asset_type = st.selectbox(
+                "Asset type",
+                asset_type_options,
+                index=asset_type_options.index(default_asset_type) if default_asset_type in asset_type_options else 0,
+            )
+
+        with col_b:
+            timeframe_options = ["1D", "1W", "1M"]
+            timeframe = st.selectbox(
+                "Timeframe",
+                timeframe_options,
+                index=timeframe_options.index(default_timeframe) if default_timeframe in timeframe_options else 0,
+            )
+            start_date = st.date_input("Start date", datetime.date.today() - datetime.timedelta(days=30))
+            end_date = st.date_input("End date", datetime.date.today())
+
+        ticker_valid = bool(symbol and market)
+        ticker_obj = None
+        if ticker_valid:
+            try:
+                selected_id = None
+                if selected_row and (
+                    symbol == selected_row["symbol"]
+                    and market == selected_row["market"]
+                    and timeframe == selected_row["timeframe"]
+                    and asset_type == selected_row["asset_type"]
+                ):
+                    selected_id = selected_row["id"]
+
+                ticker_obj = AnalyzedTicker(
+                    symbol=symbol,
+                    market=market,
+                    asset_type=asset_type,
+                    timeframe=timeframe,
+                    is_active=True,
+                    id=selected_id,
+                )
+            except Exception as e:
+                st.error(f"Ticker invalido: {e}")
+
+        c1, c2, c3 = st.columns(3)
+        do_investigate = c1.button("Investigar", use_container_width=True, disabled=not ticker_valid)
+        do_consult = c2.button("Consultar la base", use_container_width=True, disabled=not ticker_valid)
+        do_save = c3.button("Guardar informacion en la base de consulta", use_container_width=True, disabled=not ticker_valid)
+
+        if timeframe != "1D":
+            st.warning("Por ahora el provider mock y la persistencia trabajan con timeframe diario (1D).")
+
+        if ticker_obj and do_investigate:
+            with st.spinner("Obteniendo datos desde el provider..."):
+                try:
+                    bars = service.investigate(ticker_obj, start_date=start_date, end_date=end_date)
+                    st.session_state["ohlc_last_fetch"] = {
+                        "ticker": ticker_obj.to_row(),
+                        "bars": [bar.to_row() for bar in bars],
+                        "source": provider_name,
+                        "mode": "investigate",
+                    }
+                    st.success(f"Se obtuvieron {len(bars)} velas.")
+                except Exception as e:
+                    st.error(f"No se pudieron obtener los datos: {e}")
+
+        if ticker_obj and do_consult:
+            try:
+                bars = service.load_registered(symbol, market, timeframe)
+                st.session_state["ohlc_last_fetch"] = {
+                    "ticker": ticker_obj.to_row(),
+                    "bars": [bar.to_row() for bar in bars],
+                    "source": "SQLite",
+                    "mode": "database",
+                }
+                st.success(f"Se encontraron {len(bars)} velas registradas.")
+            except Exception as e:
+                st.error(f"No se pudo consultar la base: {e}")
+
+        if ticker_obj and do_save:
+            payload = st.session_state.get("ohlc_last_fetch", {})
+            bars_payload = payload.get("bars", [])
+            if not bars_payload:
+                st.warning("Primero ejecuta 'Investigar' para cargar datos antes de guardar.")
+            else:
+                try:
+                    bars = [
+                        OHLCBar(
+                            timestamp=pd.to_datetime(row["timestamp"]).to_pydatetime(),
+                            open=float(row["open"]),
+                            high=float(row["high"]),
+                            low=float(row["low"]),
+                            close=float(row["close"]),
+                            volume=float(row["volume"]),
+                        )
+                        for row in bars_payload
+                    ]
+                    saved = service.save_ticker_bars(ticker_obj, bars)
+                    st.success(f"Se guardaron {saved} velas en la base de consulta.")
+                except Exception as e:
+                    st.error(f"No se pudo guardar la informacion: {e}")
+
+        if st.session_state.get("ohlc_last_fetch"):
+            st.divider()
+            fetch_meta = st.session_state["ohlc_last_fetch"]
+            st.caption(f"Ultima fuente mostrada: {fetch_meta.get('source', 'desconocida')}")
+            last_df = bars_to_df(fetch_meta["bars"])
+            st.markdown("### Ultimo resultado")
+            if not last_df.empty:
+                st.dataframe(last_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No hay datos para mostrar.")
+
+    elif choice == "Indicadores":
+        st.subheader("Engine de Indicadores")
+        st.caption("Selecciona un ticker, guarda su configuracion de EMAs y calcula los indicadores sobre su serie historica.")
+
+        engine = get_indicator_engine()
+        catalog = engine.repository.list_tickers()
+        if not catalog:
+            st.info("No hay tickers registrados todavia. Carga primero un historico desde 'Consulta OHLC'.")
+            st.stop()
+
+        catalog_options = [
+            f"{row['symbol']} | {row['market']} | {row['timeframe']} ({row['asset_type']})"
+            for row in catalog
+        ]
+        selected_option = st.selectbox("Ticker disponible", catalog_options)
+        selected_row = next(
+            row for row in catalog
+            if f"{row['symbol']} | {row['market']} | {row['timeframe']} ({row['asset_type']})" == selected_option
+        )
+
+        ticker_obj = AnalyzedTicker(
+            id=selected_row["id"],
+            symbol=selected_row["symbol"],
+            market=selected_row["market"],
+            asset_type=selected_row["asset_type"],
+            timeframe=selected_row["timeframe"],
+            is_active=bool(selected_row["is_active"]),
+        )
+
+        current_config = engine.repository.get_indicator_config(selected_row["id"])
+        default_periods = current_config.ema_periods if current_config else [10, 20, 100]
+        default_rsi = current_config.enable_rsi if current_config else False
+        default_macd = current_config.enable_macd if current_config else False
+
+        left, right = st.columns(2)
+        with left:
+            st.markdown("### Configuracion")
+            periods_raw = st.text_input(
+                "EMA periods separados por coma",
+                value=", ".join(str(p) for p in default_periods),
+                help="Ejemplo: 10, 20, 100",
+            )
+            enable_rsi = st.toggle("Habilitar RSI", value=default_rsi)
+            enable_macd = st.toggle("Habilitar MACD", value=default_macd)
+
+        with right:
+            st.markdown("### Ticker seleccionado")
+            st.write(
+                {
+                    "symbol": ticker_obj.symbol,
+                    "market": ticker_obj.market,
+                    "asset_type": ticker_obj.asset_type,
+                    "timeframe": ticker_obj.timeframe,
+                    "ticker_id": ticker_obj.id,
+                }
+            )
+            if current_config:
+                st.caption(f"Config actual detectada: EMA {current_config.ema_periods}")
+            else:
+                st.caption("No hay configuracion guardada para este ticker.")
+
+        def parse_periods(raw):
+            items = [part.strip() for part in raw.split(",") if part.strip()]
+            periods = [int(item) for item in items]
+            if not periods:
+                raise ValueError("Debes ingresar al menos un periodo EMA.")
+            if len(set(periods)) != len(periods):
+                raise ValueError("Los periodos EMA no pueden repetirse.")
+            if periods != sorted(periods):
+                raise ValueError("Los periodos EMA deben estar ordenados de menor a mayor.")
+            return periods
+
+        col_save, col_run = st.columns(2)
+        with col_save:
+            if st.button("Guardar configuracion de indicadores", use_container_width=True):
+                try:
+                    periods = parse_periods(periods_raw)
+                    existing_config = engine.repository.get_indicator_config(ticker_obj.id)
+                    config = IndicatorConfig(
+                        id=existing_config.id if existing_config else None,
+                        ticker_id=ticker_obj.id,
+                        ema_periods=periods,
+                        enable_rsi=enable_rsi,
+                        enable_macd=enable_macd,
+                    )
+                    engine.repository.save_indicator_config(config)
+                    st.success("Configuracion de indicadores guardada.")
+                except Exception as e:
+                    st.error(f"No se pudo guardar la configuracion: {e}")
+
+        with col_run:
+            run_now = st.button("Calcular indicadores", use_container_width=True)
+
+        if run_now:
+            try:
+                periods = parse_periods(periods_raw)
+                existing_config = engine.repository.get_indicator_config(ticker_obj.id)
+                config = IndicatorConfig(
+                    id=existing_config.id if existing_config else None,
+                    ticker_id=ticker_obj.id,
+                    ema_periods=periods,
+                    enable_rsi=enable_rsi,
+                    enable_macd=enable_macd,
+                )
+                engine.repository.save_indicator_config(config)
+                result = engine.generate(ticker_obj)
+                st.session_state["indicator_last_result"] = result
+                st.success("Indicadores calculados correctamente.")
+            except MissingIndicatorConfigError as e:
+                st.error(str(e))
+            except NoHistoricalDataError as e:
+                st.error(str(e))
+            except IndicatorEngineError as e:
+                st.error(str(e))
+            except Exception as e:
+                st.error(f"Error inesperado al calcular indicadores: {e}")
+
+        result = st.session_state.get("indicator_last_result")
+        if result:
+            st.divider()
+            st.markdown("### Resultado")
+            st.json(result)
+
+            bars = engine.repository.load_bars_by_identity(
+                ticker_obj.symbol, ticker_obj.market, ticker_obj.timeframe
+            )
+            if bars:
+                df_prices = bars_to_df(bars)
+                df_prices = df_prices.rename(columns={"close": "close"})
+                chart_df = pd.DataFrame({"timestamp": df_prices["timestamp"], "close": df_prices["close"]})
+                for key, values in result["indicators"].items():
+                    chart_df[key] = values
+
+                chart_df = chart_df.set_index("timestamp")
+                st.markdown("### Precio y EMAs")
+                st.line_chart(chart_df)
+
     elif choice == "Configuración":
         st.subheader("⚙️ Configuración")
         settings = db.load_settings()
@@ -618,6 +1018,51 @@ def main():
             db.save_settings(settings)
             st.success("Preferencia de actualización guardada.")
             st.rerun()
+
+        current_ohlc_auto = settings.get("ohlc_auto_update_enabled", False)
+        new_ohlc_auto = st.toggle("Habilitar actualización automática de OHLC", value=current_ohlc_auto)
+
+        last_ohlc_update = settings.get("ohlc_last_update", "")
+        last_ohlc_status = settings.get("ohlc_last_status", "")
+
+        st.text_input(
+            "Última actualización OHLC",
+            value=last_ohlc_update if last_ohlc_update else "Sin actualizaciones aún",
+            disabled=True,
+        )
+        if last_ohlc_status:
+            st.caption(f"Último estado: {last_ohlc_status}")
+
+        if new_ohlc_auto != current_ohlc_auto:
+            settings["ohlc_auto_update_enabled"] = new_ohlc_auto
+            db.save_settings(settings)
+            st.success("Preferencia de actualización OHLC guardada.")
+            st.rerun()
+
+        if st.button("Actualizar OHLC ahora"):
+            service = get_history_service()
+            try:
+                result = service.sync_all_missing(end_date=datetime.date.today())
+                settings["ohlc_last_update"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                settings["ohlc_last_status"] = (
+                    f"updated_tickers={result['updated_tickers']}; saved_bars={result['saved_bars']}; failed_tickers={result['failed_tickers']}"
+                )
+                db.save_settings(settings)
+                if result["failed_tickers"] > 0:
+                    st.warning(
+                        f"Actualización OHLC parcial: {result['updated_tickers']} tickers, {result['saved_bars']} velas, {result['failed_tickers']} fallos."
+                    )
+                    if result["errors"]:
+                        st.caption(" | ".join(result["errors"]))
+                else:
+                    st.success(
+                        f"Actualización OHLC completada: {result['updated_tickers']} tickers, {result['saved_bars']} velas."
+                    )
+                st.rerun()
+            except Exception as e:
+                settings["ohlc_last_status"] = f"error={e}"
+                db.save_settings(settings)
+                st.error(f"No se pudo ejecutar la actualización OHLC: {e}")
 
         st.divider()
         

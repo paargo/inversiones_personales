@@ -174,6 +174,12 @@ def load_settings():
                     settings["fred_api_key"] = local_settings["fred_api_key"]
                 if "auto_update_enabled" in local_settings:
                     settings["auto_update_enabled"] = local_settings["auto_update_enabled"]
+                if "ohlc_auto_update_enabled" in local_settings:
+                    settings["ohlc_auto_update_enabled"] = local_settings["ohlc_auto_update_enabled"]
+                if "ohlc_last_update" in local_settings:
+                    settings["ohlc_last_update"] = local_settings["ohlc_last_update"]
+                if "ohlc_last_status" in local_settings:
+                    settings["ohlc_last_status"] = local_settings["ohlc_last_status"]
         except Exception as e:
             st.error(f"Error cargando settings.json local: {e}")
             
@@ -221,6 +227,12 @@ def save_settings(settings):
         local_settings["fred_api_key"] = settings["fred_api_key"]
     if "auto_update_enabled" in settings:
         local_settings["auto_update_enabled"] = settings["auto_update_enabled"]
+    if "ohlc_auto_update_enabled" in settings:
+        local_settings["ohlc_auto_update_enabled"] = settings["ohlc_auto_update_enabled"]
+    if "ohlc_last_update" in settings:
+        local_settings["ohlc_last_update"] = settings["ohlc_last_update"]
+    if "ohlc_last_status" in settings:
+        local_settings["ohlc_last_status"] = settings["ohlc_last_status"]
         
     try:
         with open("settings.json", "w") as f:
