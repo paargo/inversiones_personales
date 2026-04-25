@@ -5,7 +5,8 @@ from __future__ import annotations
 import datetime
 
 import database as db
-from market_history_service import HistoricalMarketDataService, YFinanceMarketDataProvider, SqliteMarketHistoryRepository
+from market_history_service import HistoricalMarketDataService, MockMarketDataProvider, YFinanceMarketDataProvider, SqliteMarketHistoryRepository
+from semaforo_service import SemaphoreRepository, SemaphoreService
 
 
 def main() -> int:
@@ -15,15 +16,26 @@ def main() -> int:
         return 0
 
     repository = SqliteMarketHistoryRepository("market_history.sqlite")
-    provider = YFinanceMarketDataProvider()
+    try:
+        provider = YFinanceMarketDataProvider()
+    except Exception:
+        provider = MockMarketDataProvider()
     service = HistoricalMarketDataService(provider=provider, repository=repository)
     result = service.sync_all_missing(end_date=datetime.date.today())
+
+    semaphore_repository = SemaphoreRepository("market_history.sqlite")
+    semaphore_service = SemaphoreService(history_service=service, repository=semaphore_repository)
+    semaphore_result = semaphore_service.calculate_all(persist_missing=True)
+
     settings["ohlc_last_update"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     settings["ohlc_last_status"] = (
         f"updated_tickers={result['updated_tickers']}; saved_bars={result['saved_bars']}; failed_tickers={result['failed_tickers']}"
     )
     db.save_settings(settings)
-    print(f"Done: {result['updated_tickers']} tickers, {result['saved_bars']} bars.")
+    print(
+        f"Done: {result['updated_tickers']} tickers, {result['saved_bars']} bars. "
+        f"Semaphore updated: {semaphore_result['updated_tickers']} tickers."
+    )
     return 0
 
 

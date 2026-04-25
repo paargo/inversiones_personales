@@ -26,6 +26,26 @@ CREATE TABLE IF NOT EXISTS indicator_configs (
     FOREIGN KEY (ticker_id) REFERENCES analyzed_tickers(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS semaphore_configs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker_id INTEGER NOT NULL UNIQUE,
+    enable_price_vs_ema10 INTEGER NOT NULL DEFAULT 1,
+    enable_price_vs_ema20 INTEGER NOT NULL DEFAULT 1,
+    enable_price_vs_ema100 INTEGER NOT NULL DEFAULT 1,
+    enable_ema10_vs_ema20 INTEGER NOT NULL DEFAULT 1,
+    enable_price_vs_high INTEGER NOT NULL DEFAULT 1,
+    last_calculated_at TEXT,
+    last_result_json TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (enable_price_vs_ema10 IN (0, 1)),
+    CHECK (enable_price_vs_ema20 IN (0, 1)),
+    CHECK (enable_price_vs_ema100 IN (0, 1)),
+    CHECK (enable_ema10_vs_ema20 IN (0, 1)),
+    CHECK (enable_price_vs_high IN (0, 1)),
+    FOREIGN KEY (ticker_id) REFERENCES analyzed_tickers(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS market_ohlc_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker_id INTEGER NOT NULL,
@@ -38,6 +58,15 @@ CREATE TABLE IF NOT EXISTS market_ohlc_history (
     source TEXT NOT NULL DEFAULT 'mock',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(ticker_id, timestamp),
+    FOREIGN KEY (ticker_id) REFERENCES analyzed_tickers(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS semaphore_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker_id INTEGER NOT NULL,
+    calculated_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (ticker_id) REFERENCES analyzed_tickers(id) ON DELETE CASCADE
 );
 
@@ -58,6 +87,23 @@ VALUES (
     1
 );
 
+INSERT INTO semaphore_configs (
+    ticker_id,
+    enable_price_vs_ema10,
+    enable_price_vs_ema20,
+    enable_price_vs_ema100,
+    enable_ema10_vs_ema20,
+    enable_price_vs_high
+)
+VALUES (
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+);
+
 INSERT INTO market_ohlc_history (
     ticker_id, timestamp, open, high, low, close, volume, source
 )
@@ -70,4 +116,13 @@ VALUES (
     184.10,
     52345000,
     'mock'
+);
+
+INSERT INTO semaphore_snapshots (
+    ticker_id, calculated_at, payload_json
+)
+VALUES (
+    1,
+    '2026-04-22T00:00:00Z',
+    '{"ticker":"AAPL","market":"NYSE","timeframe":"1D","calculated_at":"2026-04-22T00:00:00Z","indicators":{"price_vs_ema10":{"state":"green"},"price_vs_ema20":{"state":"green"},"price_vs_ema100":{"state":"green"},"ema10_vs_ema20":{"state":"green"},"price_vs_high":{"state":"green"}}}'
 );

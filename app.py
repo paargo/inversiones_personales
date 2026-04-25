@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import datetime
+import json
 import os
 from streamlit_autorefresh import st_autorefresh
 
@@ -15,6 +16,13 @@ from indicator_engine import (
     IndicatorEngineError,
     MissingIndicatorConfigError,
     NoHistoricalDataError,
+)
+from semaforo_service import (
+    SemaphoreConfig,
+    SemaphoreConfigNotFoundError,
+    SemaphoreRepository,
+    SemaphoreService,
+    SemaphoreServiceError,
 )
 from market_history_service import (
     HistoricalMarketDataService,
@@ -47,6 +55,13 @@ def get_indicator_engine():
     return IndicatorEngine(repository=repository, history_service=history_service)
 
 
+@st.cache_resource
+def get_semaphore_service():
+    history_service = get_history_service()
+    repository = SemaphoreRepository("market_history.sqlite")
+    return SemaphoreService(repository=repository, history_service=history_service)
+
+
 def bars_to_df(bars):
     if not bars:
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -72,6 +87,384 @@ def bars_to_df(bars):
     return df
 
 
+def render_semaphore_panel(result: dict) -> None:
+    indicators = result.get("indicators", {})
+    order = [
+        ("price_vs_ema10", "Precio vs EMA 10"),
+        ("price_vs_ema20", "Precio vs EMA 20"),
+        ("price_vs_ema100", "Precio vs EMA 100"),
+        ("ema10_vs_ema20", "EMA 10 vs EMA 20"),
+        ("price_vs_high", "Precio vs Máx Histórico"),
+    ]
+    cols = st.columns(len(order))
+
+    for idx, (key, label) in enumerate(order):
+        item = indicators.get(key, {})
+        state = item.get("state", "neutral")
+        enabled = item.get("enabled", False)
+        if state == "green":
+            bg = "#123a1d"
+            fg = "#7ee081"
+            text = "ATH" if key == "price_vs_high" else "Verde"
+        elif state == "red":
+            bg = "#3a1414"
+            fg = "#ff8a8a"
+            text = "No ATH" if key == "price_vs_high" else "Rojo"
+        else:
+            bg = "#23262d"
+            fg = "#b6bcc8"
+            text = "Sin dato"
+        if key == "price_vs_high" and enabled and state in {"green", "red"}:
+            text = _semaphore_high_label(item)
+
+        extra = ""
+        if enabled and "price" in item and "ema" in item:
+            extra = (
+                f"<div style='margin-top:6px;font-size:0.86rem;color:#c7c9cf;'>"
+                f"Precio: {item['price']:.2f} | EMA: {item['ema']:.2f} | Dif: {_semaphore_price_vs_ref_text(item, 'ema')}"
+                f"</div>"
+            )
+        elif enabled and "ema_fast" in item and "ema_slow" in item:
+            cross_text = "ALZA" if state == "green" else "BAJA" if state == "red" else "N/D"
+            extra = (
+                f"<div style='margin-top:6px;font-size:0.86rem;color:#c7c9cf;'>"
+                f"EMA10: {item['ema_fast']:.2f} | EMA20: {item['ema_slow']:.2f} | Estado: {cross_text}"
+                f"</div>"
+            )
+        elif enabled and "historical_high" in item:
+            diff_text = _semaphore_high_difference_text(item)
+            extra = (
+                f"<div style='margin-top:6px;font-size:0.86rem;color:#c7c9cf;'>"
+                f"Precio: {item['price']:.2f} | ATH: {item['historical_high']:.2f} | Dif: {diff_text}"
+                f"</div>"
+            )
+
+        cols[idx].markdown(
+            f"""
+            <div style="padding:14px 16px;border-radius:8px;border:1px solid rgba(255,255,255,0.08);background:{bg};min-height:108px;">
+              <div style="font-size:0.9rem;color:#c7c9cf;margin-bottom:8px;">{label}</div>
+              <div style="font-size:1.35rem;font-weight:700;color:{fg};">{text}</div>
+              {extra}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def _semaphore_badge(state: str, label: str) -> str:
+    if state == "green":
+        bg = "#123a1d"
+        fg = "#7ee081"
+    elif state == "red":
+        bg = "#3a1414"
+        fg = "#ff8a8a"
+    else:
+        bg = "#23262d"
+        fg = "#b6bcc8"
+    return f"<span style='display:inline-block;padding:4px 10px;border-radius:999px;background:{bg};color:{fg};font-size:0.82rem;font-weight:600;margin-right:6px;'>{label}</span>"
+
+
+def _semaphore_display_label(key: str, state: str) -> str:
+    if key == "price_vs_high":
+        return "ATH" if state == "green" else "NO ATH"
+    if state == "green":
+        return "GREEN"
+    if state == "red":
+        return "RED"
+    return "N/D"
+
+
+def _semaphore_display_label_for_row(key: str, state: str, enabled: bool) -> str:
+    if not enabled:
+        return "OFF"
+    return _semaphore_display_label(key, state)
+
+
+def _semaphore_high_difference_text(item: dict) -> str:
+    diff_pct = item.get("difference_pct")
+    if isinstance(diff_pct, (int, float)):
+        return f"{diff_pct:+.2f}%"
+
+    price = item.get("price")
+    historical_high = item.get("historical_high")
+    if isinstance(price, (int, float)) and isinstance(historical_high, (int, float)) and historical_high > 0:
+        calculated = ((price / historical_high) - 1.0) * 100.0
+        return f"{calculated:+.2f}%"
+
+    return "N/D"
+
+
+def _semaphore_high_label(item: dict) -> str:
+    state = item.get("state", "neutral")
+    diff_text = _semaphore_high_difference_text(item)
+    if state == "green":
+        return f"ATH {diff_text}"
+    if state == "red":
+        return f"NO ATH {diff_text}"
+    return "N/D"
+
+
+def _semaphore_cross_label(item: dict) -> str:
+    state = item.get("state", "neutral")
+    if state == "green":
+        return "ALZA"
+    if state == "red":
+        return "BAJA"
+    return "N/D"
+
+
+def _semaphore_reference_price_value(indicators: dict) -> float | None:
+    for key in ("price_vs_ema10", "price_vs_ema20", "price_vs_ema100", "price_vs_high"):
+        item = indicators.get(key) or {}
+        price = item.get("price")
+        if isinstance(price, (int, float)):
+            return float(price)
+    return None
+
+
+def _semaphore_reference_price_text(indicators: dict) -> str:
+    value = _semaphore_reference_price_value(indicators)
+    return f"{value:.2f}" if value is not None else "N/D"
+
+
+def _semaphore_price_vs_ref_text(item: dict, ref_key: str) -> str:
+    price = item.get("price")
+    ref_value = item.get(ref_key)
+    if isinstance(price, (int, float)) and isinstance(ref_value, (int, float)) and ref_value > 0:
+        return f"{((price / ref_value) - 1.0) * 100.0:+.2f}%"
+    return "N/D"
+
+
+
+def render_semaphore_overview(rows: list[dict]) -> None:
+    if not rows:
+        st.info("No hay semaforos configurados aun.")
+        return
+
+    header_cols = st.columns([1.7, 1.1, 1, 1, 1, 1, 1.2])
+    for col, title in zip(
+        header_cols,
+        ["Ticker", "Ultimo calculo", "EMA 10", "EMA 20", "EMA 100", "Cruce 10/20", "Máx histórico"],
+    ):
+        col.markdown(f"**{title.upper()}**")
+
+    for row in rows:
+        payload = row.get("payload") or {}
+        indicators = payload.get("indicators", {})
+        name = f"{row['symbol']} | {row['market']} | {row['timeframe']}"
+        last_calc = _format_minute_timestamp(row.get("last_calculated_at") or payload.get("calculated_at"))
+        cols = st.columns([1.7, 1.1, 1, 1, 1, 1, 1.2])
+
+        with cols[0]:
+            st.markdown(
+                f"**{name}**  <span style='display:inline-block;padding:3px 8px;border-radius:999px;background:#23262d;color:#c7c9cf;font-size:0.78rem;font-weight:600;margin-left:6px;'>Ref: {_semaphore_reference_price_text(indicators)}</span>",
+                unsafe_allow_html=True,
+            )
+            st.caption(str(row.get("asset_type", "")).upper())
+        with cols[1]:
+            st.caption(last_calc)
+        with cols[2]:
+            item = indicators.get("price_vs_ema10") or {}
+            label = _semaphore_price_vs_ref_text(item, "ema")
+            if label == "N/D":
+                label = _semaphore_display_label_for_row("price_vs_ema10", item.get("state", "neutral"), bool(row.get("enable_price_vs_ema10", 0)))
+            st.markdown(_semaphore_badge(item.get("state", "neutral"), label), unsafe_allow_html=True)
+        with cols[3]:
+            item = indicators.get("price_vs_ema20") or {}
+            label = _semaphore_price_vs_ref_text(item, "ema")
+            if label == "N/D":
+                label = _semaphore_display_label_for_row("price_vs_ema20", item.get("state", "neutral"), bool(row.get("enable_price_vs_ema20", 0)))
+            st.markdown(_semaphore_badge(item.get("state", "neutral"), label), unsafe_allow_html=True)
+        with cols[4]:
+            item = indicators.get("price_vs_ema100") or {}
+            label = _semaphore_price_vs_ref_text(item, "ema")
+            if label == "N/D":
+                label = _semaphore_display_label_for_row("price_vs_ema100", item.get("state", "neutral"), bool(row.get("enable_price_vs_ema100", 0)))
+            st.markdown(_semaphore_badge(item.get("state", "neutral"), label), unsafe_allow_html=True)
+        with cols[5]:
+            item = indicators.get("ema10_vs_ema20") or {}
+            label = _semaphore_cross_label(item) if bool(row.get("enable_ema10_vs_ema20", 0)) else "OFF"
+            st.markdown(_semaphore_badge(item.get("state", "neutral"), label), unsafe_allow_html=True)
+        with cols[6]:
+            item = indicators.get("price_vs_high") or {}
+            if bool(row.get("enable_price_vs_high", 0)):
+                label = _semaphore_high_label(item)
+            else:
+                label = "OFF"
+            st.markdown(_semaphore_badge(item.get("state", "neutral"), label), unsafe_allow_html=True)
+        st.divider()
+
+
+def render_semaphore_dashboard_section() -> None:
+    st.divider()
+    st.subheader("Semaforo General")
+    st.caption("Vista compacta del estado actual por ticker configurado.")
+
+    semaphore_service = get_semaphore_service()
+    semaphore_rows = []
+    for row in semaphore_service.repository.list_semaphore_configs():
+        payload = None
+        if row.get("last_result_json"):
+            try:
+                payload = json.loads(row["last_result_json"])
+            except Exception:
+                payload = None
+        if payload is None and row.get("ticker_id"):
+            snapshot = semaphore_service.repository.get_latest_semaphore_snapshot(int(row["ticker_id"]))
+            if snapshot:
+                payload = snapshot.get("payload")
+        semaphore_rows.append({**row, "payload": payload})
+
+    refresh_col, _ = st.columns([1, 3])
+    with refresh_col:
+        if st.button("Recalcular semaforo", use_container_width=True):
+            try:
+                result = semaphore_service.calculate_all(persist_missing=True)
+                st.session_state["semaphore_dashboard_refresh"] = result
+                if result["failed_tickers"] > 0:
+                    st.warning(
+                        f"Semaforo recalculado con fallos: {result['updated_tickers']} actualizados, {result['failed_tickers']} fallos."
+                    )
+                    if result["errors"]:
+                        st.caption(" | ".join(result["errors"]))
+                else:
+                    st.success(
+                        f"Semaforo recalculado: {result['updated_tickers']} tickers actualizados."
+                    )
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo recalcular el semaforo: {e}")
+
+    render_semaphore_overview(semaphore_rows)
+
+
+def render_semaphore_configuration_section() -> None:
+    st.divider()
+    st.subheader("Semaforo de Indicadores")
+    st.caption("Configura una lista de ticks y actualiza el estado usando el ultimo historico disponible.")
+
+    semaphore_service = get_semaphore_service()
+    semaphore_catalog = semaphore_service.repository.list_tickers()
+    if not semaphore_catalog:
+        st.info("No hay tickers cargados para configurar el semaforo. Primero registra uno en Consulta OHLC.")
+        return
+
+    semaphore_options = [
+        f"{row['symbol']} | {row['market']} | {row['timeframe']} ({row['asset_type']})"
+        for row in semaphore_catalog
+    ]
+    semaphore_selected_option = st.selectbox("Ticker configurado", semaphore_options, key="semaphore_ticker")
+    semaphore_selected_row = next(
+        row for row in semaphore_catalog
+        if f"{row['symbol']} | {row['market']} | {row['timeframe']} ({row['asset_type']})" == semaphore_selected_option
+    )
+    semaphore_ticker = AnalyzedTicker(
+        id=semaphore_selected_row["id"],
+        symbol=semaphore_selected_row["symbol"],
+        market=semaphore_selected_row["market"],
+        asset_type=semaphore_selected_row["asset_type"],
+        timeframe=semaphore_selected_row["timeframe"],
+        is_active=bool(semaphore_selected_row.get("is_active", 1)),
+    )
+
+    current_config = semaphore_service.get_config(semaphore_ticker)
+    if current_config is None:
+        current_config = SemaphoreConfig(ticker_id=semaphore_ticker.id or 0)
+
+    sem_col1, sem_col2 = st.columns(2)
+    with sem_col1:
+        enable_price_vs_ema10 = st.checkbox(
+            "Precio vs EMA 10",
+            value=current_config.enable_price_vs_ema10,
+            key=f"semaforo_price_ema10_{semaphore_ticker.id}",
+        )
+        enable_price_vs_ema20 = st.checkbox(
+            "Precio vs EMA 20",
+            value=current_config.enable_price_vs_ema20,
+            key=f"semaforo_price_ema20_{semaphore_ticker.id}",
+        )
+    with sem_col2:
+        enable_price_vs_ema100 = st.checkbox(
+            "Precio vs EMA 100",
+            value=current_config.enable_price_vs_ema100,
+            key=f"semaforo_price_ema100_{semaphore_ticker.id}",
+        )
+        enable_ema10_vs_ema20 = st.checkbox(
+            "Cruce EMA 10 / EMA 20",
+            value=current_config.enable_ema10_vs_ema20,
+            key=f"semaforo_cross_ema_{semaphore_ticker.id}",
+        )
+        enable_price_vs_high = st.checkbox(
+            "Precio vs M?x hist?rico",
+            value=current_config.enable_price_vs_high,
+            key=f"semaforo_price_high_{semaphore_ticker.id}",
+        )
+
+    sem_last_calc = _format_minute_timestamp(current_config.last_calculated_at if current_config else None)
+    st.text_input("Ultimo calculo", value=sem_last_calc, disabled=True, key=f"semaforo_last_calc_{semaphore_ticker.id}")
+
+    sem_save_col, sem_calc_col = st.columns(2)
+    with sem_save_col:
+        if st.button("Guardar configuracion del semaforo", use_container_width=True, key=f"semaforo_save_{semaphore_ticker.id}"):
+            try:
+                semaphore_service.save_config(
+                    semaphore_ticker,
+                    SemaphoreConfig(
+                        ticker_id=semaphore_ticker.id or semaphore_ticker.id or 0,
+                        enable_price_vs_ema10=enable_price_vs_ema10,
+                        enable_price_vs_ema20=enable_price_vs_ema20,
+                        enable_price_vs_ema100=enable_price_vs_ema100,
+                        enable_ema10_vs_ema20=enable_ema10_vs_ema20,
+                        enable_price_vs_high=enable_price_vs_high,
+                    ),
+                )
+                st.success("Configuracion del semaforo guardada.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error guardando configuracion: {e}")
+    with sem_calc_col:
+        if st.button("Calcular semaforo ahora", use_container_width=True, key=f"semaforo_calc_{semaphore_ticker.id}"):
+            try:
+                semaphore_service.save_config(
+                    semaphore_ticker,
+                    SemaphoreConfig(
+                        ticker_id=semaphore_ticker.id or 0,
+                        enable_price_vs_ema10=enable_price_vs_ema10,
+                        enable_price_vs_ema20=enable_price_vs_ema20,
+                        enable_price_vs_ema100=enable_price_vs_ema100,
+                        enable_ema10_vs_ema20=enable_ema10_vs_ema20,
+                        enable_price_vs_high=enable_price_vs_high,
+                    ),
+                )
+                semaphore_result = semaphore_service.calculate(semaphore_ticker, persist_missing=True)
+                st.session_state[f"semaphore_last_result_{semaphore_ticker.id}"] = semaphore_result
+                st.success("Semaforo calculado correctamente.")
+                st.rerun()
+            except SemaphoreConfigNotFoundError:
+                st.error("No existe configuracion para este ticker.")
+            except SemaphoreServiceError as e:
+                st.error(f"Error al calcular semaforo: {e}")
+            except Exception as e:
+                st.error(f"Error inesperado al calcular semaforo: {e}")
+
+    semaphore_result = st.session_state.get(f"semaphore_last_result_{semaphore_ticker.id}")
+    if semaphore_result is None and current_config and current_config.last_result_json:
+        try:
+            semaphore_result = json.loads(current_config.last_result_json)
+        except Exception:
+            semaphore_result = None
+    if semaphore_result is None:
+        semaphore_result = semaphore_service.get_latest_snapshot(semaphore_ticker)
+        if semaphore_result:
+            semaphore_result = semaphore_result.get("payload")
+
+    if semaphore_result:
+        render_semaphore_panel(semaphore_result)
+        st.json(semaphore_result, expanded=False)
+    else:
+        st.info("Todavia no hay un calculo guardado para este ticker.")
+
+
 def _parse_iso_datetime(value):
     if not value:
         return None
@@ -79,6 +472,15 @@ def _parse_iso_datetime(value):
         return datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except Exception:
         return None
+
+
+def _format_minute_timestamp(value):
+    if not value:
+        return "-"
+    parsed = _parse_iso_datetime(value) if not isinstance(value, datetime.datetime) else value
+    if parsed is None:
+        return str(value)
+    return parsed.strftime("%Y-%m-%d %H:%M")
 
 
 def run_history_auto_sync(settings):
@@ -101,7 +503,7 @@ def run_history_auto_sync(settings):
     with st.spinner("Actualizando historicos OHLC automaticamente..."):
         try:
             result = service.sync_all_missing(end_date=today)
-            settings["ohlc_last_update"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            settings["ohlc_last_update"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="minutes")
             settings["ohlc_last_status"] = (
                 f"updated_tickers={result['updated_tickers']}; saved_bars={result['saved_bars']}; failed_tickers={result['failed_tickers']}"
             )
@@ -587,6 +989,8 @@ def main():
                             sync = True
                     if sync: st.rerun()
 
+                render_semaphore_dashboard_section()
+
             elif choice == "Detalle":
                 # Detailed breakdown table
                 b_df = df.copy()
@@ -1043,7 +1447,7 @@ def main():
             service = get_history_service()
             try:
                 result = service.sync_all_missing(end_date=datetime.date.today())
-                settings["ohlc_last_update"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                settings["ohlc_last_update"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="minutes")
                 settings["ohlc_last_status"] = (
                     f"updated_tickers={result['updated_tickers']}; saved_bars={result['saved_bars']}; failed_tickers={result['failed_tickers']}"
                 )
@@ -1065,7 +1469,11 @@ def main():
                 st.error(f"No se pudo ejecutar la actualización OHLC: {e}")
 
         st.divider()
-        
+
+        render_semaphore_configuration_section()
+
+        st.divider()
+
         # 1. API Integration Settings
         st.markdown("### Integración de API")
         st.info("Las llaves de API ahora se gestionan a través de Streamlit Secrets por seguridad.")
