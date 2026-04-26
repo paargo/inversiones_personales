@@ -34,5 +34,10 @@ build/
 dist/
 
 # OS generated files
+.credentials.json
+.env
+.git-credentials
+.DS_Store
+credentials.json
 .DS_Store
 Thumbs.db
