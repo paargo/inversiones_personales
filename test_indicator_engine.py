@@ -53,6 +53,10 @@ class TestIndicatorEngine(unittest.TestCase):
         self.assertIn("ema_5", result["indicators"])
         self.assertIn("ema_10", result["indicators"])
         self.assertEqual(len(result["indicators"]["ema_3"]), len(result["indicators"]["ema_5"]))
+        snapshot = self.repo.get_latest_indicator_snapshot(self.ticker_id)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["payload"]["ticker"], "AAPL")
+        self.assertEqual(snapshot["payload"]["ticker_id"], self.ticker_id)
 
     def test_missing_config_raises(self):
         with self.assertRaises(MissingIndicatorConfigError):

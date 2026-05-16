@@ -1213,13 +1213,14 @@ def main():
             with st.spinner("Obteniendo datos desde el provider..."):
                 try:
                     bars = service.investigate(ticker_obj, start_date=start_date, end_date=end_date)
+                    saved = service.save_ticker_bars(ticker_obj, bars) if bars else 0
                     st.session_state["ohlc_last_fetch"] = {
                         "ticker": ticker_obj.to_row(),
                         "bars": [bar.to_row() for bar in bars],
                         "source": provider_name,
                         "mode": "investigate",
                     }
-                    st.success(f"Se obtuvieron {len(bars)} velas.")
+                    st.success(f"Se obtuvieron {len(bars)} velas y se registraron {saved} en la base.")
                 except Exception as e:
                     st.error(f"No se pudieron obtener los datos: {e}")
 
@@ -1240,7 +1241,7 @@ def main():
             payload = st.session_state.get("ohlc_last_fetch", {})
             bars_payload = payload.get("bars", [])
             if not bars_payload:
-                st.warning("Primero ejecuta 'Investigar' para cargar datos antes de guardar.")
+                st.warning("Primero ejecuta 'Investigar' o 'Consultar la base' para cargar datos antes de guardar.")
             else:
                 try:
                     bars = [
@@ -1376,7 +1377,7 @@ def main():
                 )
                 engine.repository.save_indicator_config(config)
                 result = engine.generate(ticker_obj)
-                st.session_state["indicator_last_result"] = result
+                st.session_state[f"indicator_last_result_{ticker_obj.id}"] = result
                 st.success("Indicadores calculados correctamente.")
             except MissingIndicatorConfigError as e:
                 st.error(str(e))
@@ -1387,7 +1388,11 @@ def main():
             except Exception as e:
                 st.error(f"Error inesperado al calcular indicadores: {e}")
 
-        result = st.session_state.get("indicator_last_result")
+        result = st.session_state.get(f"indicator_last_result_{ticker_obj.id}")
+        if result is None and ticker_obj.id:
+            snapshot = engine.repository.get_latest_indicator_snapshot(ticker_obj.id)
+            if snapshot:
+                result = snapshot.get("payload")
         if result:
             st.divider()
             st.markdown("### Resultado")

@@ -52,6 +52,24 @@ class IndicatorRepository(SqliteMarketHistoryRepository):
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS indicator_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker_id INTEGER NOT NULL,
+                    calculated_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (ticker_id) REFERENCES analyzed_tickers(id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_indicator_snapshots_ticker_calculated_at
+                ON indicator_snapshots (ticker_id, calculated_at DESC)
+                """
+            )
 
     def save_indicator_config(self, config: IndicatorConfig) -> int:
         with self._connect() as conn:
@@ -109,6 +127,40 @@ class IndicatorRepository(SqliteMarketHistoryRepository):
             return None
         return self.get_indicator_config(ticker_id)
 
+    def save_indicator_snapshot(self, ticker_id: int, payload: Dict) -> int:
+        calculated_at = payload.get("calculated_at") or datetime.now(timezone.utc).isoformat(timespec="minutes")
+        payload_json = json.dumps(payload, ensure_ascii=False)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO indicator_snapshots (ticker_id, calculated_at, payload_json)
+                VALUES (?, ?, ?)
+                """,
+                (ticker_id, calculated_at, payload_json),
+            )
+            return int(cursor.lastrowid)
+
+    def get_latest_indicator_snapshot(self, ticker_id: int) -> Optional[Dict]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT calculated_at, payload_json
+                FROM indicator_snapshots
+                WHERE ticker_id = ?
+                ORDER BY calculated_at DESC
+                LIMIT 1
+                """,
+                (ticker_id,),
+            ).fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "calculated_at": row["calculated_at"],
+            "payload": json.loads(row["payload_json"]),
+        }
+
 
 class IndicatorEngine:
     """Coordinates history loading, config loading, and EMA calculation."""
@@ -151,11 +203,16 @@ class IndicatorEngine:
         for period in config.ema_periods:
             indicators[f"ema_{period}"] = calculateEMA(closes, period)
 
-        return {
+        payload = {
             "ticker": ticker.symbol,
+            "market": ticker.market,
             "timeframe": ticker.timeframe,
+            "ticker_id": ticker_id,
+            "calculated_at": datetime.now(timezone.utc).isoformat(timespec="minutes"),
             "indicators": indicators,
         }
+        self.repository.save_indicator_snapshot(ticker_id, payload)
+        return payload
 
     def generate_by_identity(
         self,
