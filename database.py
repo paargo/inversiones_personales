@@ -3,9 +3,13 @@ import time
 import os
 from typing import Any
 
-import gspread
 import pandas as pd
-from oauth2client.service_account import ServiceAccountCredentials
+try:
+    import gspread
+    from oauth2client.service_account import ServiceAccountCredentials
+except ModuleNotFoundError:
+    gspread = None
+    ServiceAccountCredentials = None
 
 import utils
 
@@ -47,6 +51,13 @@ class DatabaseError(Exception):
     """Base exception for Google Sheets and local settings operations."""
 
 
+def _ensure_google_dependencies() -> None:
+    if gspread is None or ServiceAccountCredentials is None:
+        raise DatabaseError(
+            "Faltan dependencias de Google Sheets. Instala 'gspread' y 'oauth2client' para usar la base remota."
+        )
+
+
 def _empty_dataframe(columns: list[str]) -> pd.DataFrame:
     return pd.DataFrame(columns=columns)
 
@@ -80,6 +91,7 @@ def has_google_credentials() -> bool:
 
 
 def _build_credentials():
+    _ensure_google_dependencies()
     creds_dict = utils.get_secret("gcp_service_account")
     if creds_dict:
         return ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
@@ -101,6 +113,7 @@ def get_db_connection():
     cache for settings to reduce the number of reads to Sheets.
     """
     global _SETTINGS_CACHE, _SETTINGS_CACHE_TIME
+    _ensure_google_dependencies()
     # Simple in-process cache to avoid hitting Sheets on every call
     if _SETTINGS_CACHE is not None and (time.time() - _SETTINGS_CACHE_TIME) < _SETTINGS_CACHE_TTL:
         # We can't reuse the Sheets client from cache directly here since it returns a
