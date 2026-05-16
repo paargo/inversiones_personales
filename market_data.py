@@ -1,12 +1,20 @@
 import requests
-import yfinance as yf
 import pandas as pd
 import streamlit as st
 import datetime
 import json
 import os
 
+try:
+    import yfinance as yf
+except ModuleNotFoundError:
+    yf = None
+
 MARKET_CACHE_FILE = "market_cache.json"
+
+
+def _has_yfinance() -> bool:
+    return yf is not None
 
 def is_market_hours():
     """Check if current time is Mon-Fri, 9:00 - 18:00 Argentina time (UTC-3)"""
@@ -68,17 +76,18 @@ def get_dolar_rates():
             rates["Blue"] = resp_blue.json().get("venta", 0.0)
 
         # Proxy for dollar variation (ARS=X which is USD/ARS exchange rate)
-        try:
-            stock = yf.Ticker("ARS=X")
-            hist = stock.history(period="2d")
-            if len(hist) >= 2:
-                prev = hist["Close"].iloc[-2]
-                curr = hist["Close"].iloc[-1]
-                rates["variation"] = (curr / prev - 1)
-            elif not hist.empty:
-                rates["variation"] = 0.0
-        except:
-            pass
+        if _has_yfinance():
+            try:
+                stock = yf.Ticker("ARS=X")
+                hist = stock.history(period="2d")
+                if len(hist) >= 2:
+                    prev = hist["Close"].iloc[-2]
+                    curr = hist["Close"].iloc[-1]
+                    rates["variation"] = (curr / prev - 1)
+                elif not hist.empty:
+                    rates["variation"] = 0.0
+            except:
+                pass
             
         # Save successful fetch to local cache for off-hours
         if rates["MEP"] > 0:
@@ -116,19 +125,37 @@ def get_market_price(ticker, source):
                     price = float(data["price"])
                     
                 # For prev_close, we fallback to Yahoo since Binance ticker 24h is another call
-                yf_symbol = f"{ticker}-USD"
-                stock = yf.Ticker(yf_symbol)
-                hist = stock.history(period="2d")
-                if len(hist) >= 2:
-                    prev_close = hist["Close"].iloc[-2]
-                elif not hist.empty:
-                    prev_close = hist["Close"].iloc[0]
+                if _has_yfinance():
+                    yf_symbol = f"{ticker}-USD"
+                    stock = yf.Ticker(yf_symbol)
+                    hist = stock.history(period="2d")
+                    if len(hist) >= 2:
+                        prev_close = hist["Close"].iloc[-2]
+                    elif not hist.empty:
+                        prev_close = hist["Close"].iloc[0]
                     
             except Exception as e:
                 print(f"Binance API error for {ticker}: {e}. Falling back to Yahoo Finance.")
+                if _has_yfinance():
+                    try:
+                        yf_symbol = f"{ticker}-USD"
+                        stock = yf.Ticker(yf_symbol)
+                        hist = stock.history(period="2d")
+                        if not hist.empty:
+                            price = hist["Close"].iloc[-1]
+                            if len(hist) >= 2:
+                                prev_close = hist["Close"].iloc[-2]
+                            else:
+                                prev_close = price
+                            currency = "USD"
+                    except Exception as yf_e:
+                        print(f"Yahoo Finance fallback error for {ticker}: {yf_e}")
+
+        elif source == "Argentina (BYMA)":
+            symbol = ticker if ticker.endswith(".BA") else f"{ticker}.BA"
+            if _has_yfinance():
                 try:
-                    yf_symbol = f"{ticker}-USD"
-                    stock = yf.Ticker(yf_symbol)
+                    stock = yf.Ticker(symbol)
                     hist = stock.history(period="2d")
                     if not hist.empty:
                         price = hist["Close"].iloc[-1]
@@ -136,32 +163,17 @@ def get_market_price(ticker, source):
                             prev_close = hist["Close"].iloc[-2]
                         else:
                             prev_close = price
-                        currency = "USD"
-                except Exception as yf_e:
-                    print(f"Yahoo Finance fallback error for {ticker}: {yf_e}")
-
-        elif source == "Argentina (BYMA)":
-            symbol = ticker if ticker.endswith(".BA") else f"{ticker}.BA"
-            try:
-                stock = yf.Ticker(symbol)
-                hist = stock.history(period="2d")
-                if not hist.empty:
-                    price = hist["Close"].iloc[-1]
-                    if len(hist) >= 2:
-                        prev_close = hist["Close"].iloc[-2]
-                    else:
-                        prev_close = price
-                    
-                    try:
-                        curr = stock.fast_info.currency
-                        if curr:
-                            currency = curr
-                        else:
-                            currency = "ARS" 
-                    except:
-                        currency = "ARS"
-            except Exception as e:
-                print(f"YFinance error for {symbol}: {e}")
+                        
+                        try:
+                            curr = stock.fast_info.currency
+                            if curr:
+                                currency = curr
+                            else:
+                                currency = "ARS" 
+                        except:
+                            currency = "ARS"
+                except Exception as e:
+                    print(f"YFinance error for {symbol}: {e}")
                 
     except Exception as e:
         print(f"Error fetching {ticker} from {source}: {e}")
@@ -173,6 +185,9 @@ def get_historical_prices(tickers_with_sources, start_date):
     """
     Fetch historical prices for a list of tickers from yfinance.
     """
+    if not _has_yfinance():
+        return pd.DataFrame()
+
     all_data = pd.DataFrame()
     
     for ticker, source in tickers_with_sources.items():
