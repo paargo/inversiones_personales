@@ -3,7 +3,11 @@ import pandas as pd
 import datetime
 import json
 import os
-from streamlit_autorefresh import st_autorefresh
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ModuleNotFoundError:
+    def st_autorefresh(*args, **kwargs):
+        return None
 
 # Custom Modules
 import utils
