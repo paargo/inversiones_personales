@@ -1,7 +1,4 @@
-streamlit
+streamlit>=1.23
 pandas
-requests
-gspread
-oauth2client
-yfinance
-streamlit-autorefresh
+numpy
+pytest

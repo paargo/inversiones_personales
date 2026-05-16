@@ -1,47 +1,40 @@
-﻿import sys
-import pandas as pd
-import datetime
-sys.path.append('.')
-import database as db
+import unittest
+from unittest.mock import Mock, patch
+
 import market_data as md
 
-settings = db.load_settings()
-fred_key = settings.get('fred_api_key')
-print('FRED KEY:', 'Configured' if fred_key else 'Not Configured')
 
-if fred_key:
-    cpi_raw = md.get_us_cpi(fred_key)
-    print('CPI points:', len(cpi_raw) if cpi_raw else 0)
-    if not cpi_raw:
-         print('API returned empty! Maybe invalid key?')
+class TestUSCpi(unittest.TestCase):
+    @patch("market_data.requests.get")
+    def test_returns_parsed_observations(self, mock_get):
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "observations": [
+                {"date": "2024-01-01", "value": "300.1"},
+                {"date": "2024-02-01", "value": "."},
+                {"date": "2024-03-01", "value": "301.8"},
+            ]
+        }
+        mock_get.return_value = response
 
-try:
-    df = db.load_data()
-    if df.empty:
-        print('No data to plot')
-        sys.exit(0)
-        
-    df['Date'] = pd.to_datetime(df['Date'])
-    min_d = df['Date'].min()
-    dr = pd.date_range(start=min_d, end=datetime.date.today(), freq='D')
-    
-    cpi_series = None
-    if fred_key:
-        cpi_raw = md.get_us_cpi(fred_key)
-        if cpi_raw:
-            cpi_series = pd.Series(cpi_raw)
-            cpi_series.index = pd.to_datetime(cpi_series.index)
-            cpi_series = cpi_series.sort_index()
-            print('CPI Series initialized, items:', len(cpi_series))
+        result = md.get_us_cpi("test-key")
 
-    d = dr[0]
-    print('Testing date:', d)
-    d_cpi_slice = cpi_series.loc[:d]
-    print('d_cpi_slice len:', len(d_cpi_slice))
-    current_cpi = d_cpi_slice.iloc[-1]
-    print('current_cpi:', current_cpi)
+        self.assertEqual(
+            result,
+            {
+                "2024-01-01": 300.1,
+                "2024-03-01": 301.8,
+            },
+        )
 
-except Exception as e:
-    import traceback
-    traceback.print_exc()
+    @patch("market_data.requests.get")
+    def test_returns_empty_dict_when_api_key_missing(self, mock_get):
+        result = md.get_us_cpi("")
 
+        self.assertEqual(result, {})
+        mock_get.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

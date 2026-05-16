@@ -1,19 +1,38 @@
-
-# Python
+# Python artifacts
 __pycache__/
 *.py[cod]
-*$py.class
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+__pycache__/
+*.log
+*.db
+*.sqlite3
 
-# Streamlit
-.streamlit/
-*.csv
-settings.json
-
-# Environment
-.env
-.venv
-env/
+# Virtual environments
+.venv/
 venv/
-credentials.json
-market_history.sqlite
-.yfinance_cache/
+ENV/
+env/
+envs/
+ENVs/
+*.venv/
+.venv/
+venv*/
+
+# Pytest cache
+__pytest_cache__/
+.pytest_cache/
+
+# Streamlit artifacts
+.streamlit/
+
+# Node / frontend artifacts (if any TS tooling is added later)
+node_modules/
+build/
+dist/
+
+# OS generated files
+.DS_Store
+Thumbs.db

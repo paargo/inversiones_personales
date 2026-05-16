@@ -1,0 +1,14 @@
+{
+    "api_keys": {
+        "binance_key": "EL9D50k2XbV6bavL7Qa3nSqTEdrDucRajHv3Z1hO2O1DoXAmOPi4GV1EvKPWrCGs",
+        "binance_secret": "NvCOcz77HQJU4VyJ3D5FpokZecWd0uHXmme0T9k8WSv9DFMFbmOtbHQC8F4O1DlJ",
+        "stock_key": ""
+    },
+    "ticker_config": {
+        "BTC": "Binance API"
+    },
+    "fred_api_key": "757f1dbbd63fbac660b4f423a47e7d76",
+    "ohlc_auto_update_enabled": true,
+    "ohlc_last_update": "2026-04-26T03:52+00:00",
+    "ohlc_last_status": "updated_tickers=3; saved_bars=3; failed_tickers=0"
+}

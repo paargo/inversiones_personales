@@ -1,312 +1,349 @@
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-import pandas as pd
-import streamlit as st
-import utils
 import json
+import time
 import os
+from typing import Any
+
+import gspread
+import pandas as pd
+from oauth2client.service_account import ServiceAccountCredentials
+
+import utils
 
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+DEFAULT_SHEET_NAME = "Investment Tracker Data"
+SETTINGS_FILE = "settings.json"
+CREDENTIALS_FILE = "credentials.json"
 
-@st.cache_resource
-def get_db_connection():
-    """Connect to Google Sheets using st.secrets or local credentials.json"""
+INVESTMENTS_COLUMNS = [
+    "Date",
+    "Ticker",
+    "Platform",
+    "Quantity",
+    "Price",
+    "Currency",
+    "Commission",
+    "Commission_Type",
+    "Commission_Currency",
+    "Total_Cost",
+]
+PLATFORMS_COLUMNS = [
+    "Platform",
+    "Entry Commission",
+    "Entry Type",
+    "Exit Commission",
+    "Exit Type",
+    "Commission Currency",
+]
+EARNINGS_COLUMNS = ["Date", "Ticker", "Platform", "Type", "Currency", "Amount", "Capital_Reduction"]
+SETTINGS_COLUMNS = ["Ticker", "Data Source", "Type"]
+DEFAULT_PLATFORM_ROWS = [
+    ["Binance", 0.1, "Percentage", 0.1, "Percentage", "BTC"],
+    ["Interactive Brokers", 1.0, "Amount", 1.0, "Amount", "USD"],
+    ["Coinbase", 0.5, "Percentage", 0.5, "Percentage", "USD"],
+]
+
+
+class DatabaseError(Exception):
+    """Base exception for Google Sheets and local settings operations."""
+
+
+def _empty_dataframe(columns: list[str]) -> pd.DataFrame:
+    return pd.DataFrame(columns=columns)
+
+
+def _clean_json_dict(raw: Any) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
+def _load_local_settings() -> dict:
+    if not os.path.exists(SETTINGS_FILE):
+        return {}
     try:
-        # Check if running on Streamlit Cloud (or if secrets are set locally in .streamlit/secrets.toml)
-        creds_dict = utils.get_secret("gcp_service_account")
-        if creds_dict:
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-        else:
-            # Fallback to local file for development
-            creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", SCOPE)
-        
-        client = gspread.authorize(creds)
-        
-        # Open the spreadsheet (assumes user named it "Investment Tracker Data")
-        # You can also config the sheet name in secrets
-        sheet_name = utils.get_secret("sheet_name") or "Investment Tracker Data"
-            
-        sh = client.open(sheet_name)
-        return sh
-    except Exception as e:
-        st.error(f"Error de conexión a la base de datos: {e}")
-        st.stop()
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as handle:
+            return _clean_json_dict(json.load(handle))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DatabaseError(f"No se pudo leer {SETTINGS_FILE}: {exc}") from exc
+
+
+def _save_local_settings(payload: dict) -> None:
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=4, ensure_ascii=False)
+    except OSError as exc:
+        raise DatabaseError(f"No se pudo guardar {SETTINGS_FILE}: {exc}") from exc
+
+
+def has_google_credentials() -> bool:
+    return bool(utils.get_secret("gcp_service_account")) or os.path.exists(CREDENTIALS_FILE)
+
+
+def _build_credentials():
+    creds_dict = utils.get_secret("gcp_service_account")
+    if creds_dict:
+        return ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
+    if os.path.exists(CREDENTIALS_FILE):
+        return ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, SCOPE)
+    raise DatabaseError("No se encontraron credenciales de Google Sheets.")
+
+
+_SETTINGS_CACHE = None
+_SETTINGS_CACHE_TIME = 0
+_SETTINGS_CACHE_TTL = 60  # seconds for sheet object
+_SETTINGS_DATA_CACHE = None
+_SETTINGS_DATA_CACHE_TIME = 0
+
+def get_db_connection():
+    """Connect to Google Sheets using Streamlit secrets or a local credentials file.
+
+    Added a small retry/backoff on transient rate-limit errors (HTTP 429) and a
+    cache for settings to reduce the number of reads to Sheets.
+    """
+    global _SETTINGS_CACHE, _SETTINGS_CACHE_TIME
+    # Simple in-process cache to avoid hitting Sheets on every call
+    if _SETTINGS_CACHE is not None and (time.time() - _SETTINGS_CACHE_TIME) < _SETTINGS_CACHE_TTL:
+        # We can't reuse the Sheets client from cache directly here since it returns a
+        # Sheet object, but we keep the behavior controlled: if cache exists, return it
+        return _SETTINGS_CACHE  # type: ignore
+    try:
+        # Retry loop for transient errors like 429
+        for attempt in range(5):
+            try:
+                creds = _build_credentials()
+                client = gspread.authorize(creds)
+                sheet_name = utils.get_secret("sheet_name") or DEFAULT_SHEET_NAME
+                sh = client.open(sheet_name)
+                # Cache the open sheet object for quick reuse in this session
+                _SETTINGS_CACHE = sh
+                _SETTINGS_CACHE_TIME = time.time()
+                return sh
+            except Exception as exc:
+                # Detect common quota errors
+                msg = str(exc) if exc is not None else ""
+                if attempt < 4 and ("429" in msg or "Too Many Requests" in msg or "quota" in msg.lower()):
+                    backoff = 2 ** attempt
+                    time.sleep(backoff)
+                    continue
+                raise
+    except DatabaseError:
+        raise
+    except Exception as exc:
+        raise DatabaseError(f"Error de conexión a Google Sheets: {exc}") from exc
+
 
 def init_worksheets(sh):
-    """Ensure required worksheets exist"""
+    """Ensure required worksheets exist and basic schema is upgraded."""
     try:
-        # Investments Sheet
         try:
             ws_inv = sh.worksheet("Investments")
         except gspread.WorksheetNotFound:
             ws_inv = sh.add_worksheet(title="Investments", rows=1000, cols=20)
-            ws_inv.append_row([
-                "Date", "Ticker", "Platform", "Quantity", "Price", 
-                "Currency", "Commission", "Commission_Type", "Commission_Currency", "Total_Cost"
-            ])
+            ws_inv.append_row(INVESTMENTS_COLUMNS)
 
-        # Platforms Sheet
         try:
             ws_platforms = sh.worksheet("Platforms")
         except gspread.WorksheetNotFound:
             ws_platforms = sh.add_worksheet(title="Platforms", rows=100, cols=10)
-            ws_platforms.append_row([
-                "Platform", "Entry Commission", "Entry Type", 
-                "Exit Commission", "Exit Type", "Commission Currency"
-            ])
-            # Add some defaults
-            ws_platforms.append_rows([
-                ["Binance", 0.1, "Percentage", 0.1, "Percentage", "BTC"],
-                ["Interactive Brokers", 1.0, "Amount", 1.0, "Amount", "USD"],
-                ["Coinbase", 0.5, "Percentage", 0.5, "Percentage", "USD"]
-            ])
+            ws_platforms.append_row(PLATFORMS_COLUMNS)
+            ws_platforms.append_rows(DEFAULT_PLATFORM_ROWS)
 
-        # Settings Sheet (Ticker Config)
         try:
             ws_settings = sh.worksheet("Settings")
-            # Upgrade check: ensure "Type" column exists
             headers = ws_settings.row_values(1)
             if "Type" not in headers:
                 ws_settings.update_cell(1, 3, "Type")
         except gspread.WorksheetNotFound:
             ws_settings = sh.add_worksheet(title="Settings", rows=100, cols=5)
-            ws_settings.append_row(["Ticker", "Data Source", "Type"])
+            ws_settings.append_row(SETTINGS_COLUMNS)
 
-        # Earnings Sheet
         try:
             ws_earn = sh.worksheet("Earnings")
-            # Upgrade check: ensure "Platform" column exists
             headers_earn = ws_earn.row_values(1)
             if "Platform" not in headers_earn:
-                # Add "Platform" as the 3rd column
                 ws_earn.insert_cols([["Platform"]], col=3)
         except gspread.WorksheetNotFound:
             ws_earn = sh.add_worksheet(title="Earnings", rows=1000, cols=10)
-            ws_earn.append_row([
-                "Date", "Ticker", "Platform", "Type", "Currency", "Amount", "Capital_Reduction"
-            ])
+            ws_earn.append_row(EARNINGS_COLUMNS)
 
-        return ws_inv, ws_settings
-    except Exception as e:
-        st.error(f"Error de inicialización de hojas: {e}")
-        st.stop()
+        return {
+            "investments": ws_inv,
+            "platforms": ws_platforms,
+            "settings": ws_settings,
+            "earnings": ws_earn,
+        }
+    except Exception as exc:
+        raise DatabaseError(f"Error de inicialización de hojas: {exc}") from exc
 
-@st.cache_data(ttl=600)
-def load_data():
-    sh = get_db_connection()
-    ws_inv, _ = init_worksheets(sh)
-    # Use UNFORMATTED_VALUE to get raw numbers (floats) instead of formatted strings
-    # This avoids locale issues where "3,000" might be parsed as 3000 instead of 3.0
-    data = ws_inv.get_all_records(value_render_option='UNFORMATTED_VALUE')
-    if data:
-        df = pd.DataFrame(data)
-        # Ensure all expected columns exist
-        expected_cols = ["Date", "Ticker", "Platform", "Quantity", "Price", 
-                         "Currency", "Commission", "Commission_Type", "Commission_Currency", "Total_Cost"]
-        for col in expected_cols:
-            if col not in df.columns:
-                df[col] = "" # Default to empty string for missing cols
-        
-        # Enforce numeric types using safe_float
-        numeric_cols = ["Quantity", "Price", "Commission", "Total_Cost"]
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = df[col].apply(utils.safe_float)
-        return df
-    else:
-        return pd.DataFrame(columns=[
-            "Date", "Ticker", "Platform", "Quantity", "Price", 
-            "Currency", "Commission", "Commission_Type", "Commission_Currency", "Total_Cost"
-        ])
 
-def save_data(df):
-    st.cache_data.clear()
-    sh = get_db_connection()
-    ws_inv, _ = init_worksheets(sh)
-    
-    # Prepare data for saving
+def _read_records(worksheet, columns: list[str], *, value_render_option=None) -> pd.DataFrame:
+    kwargs = {}
+    if value_render_option is not None:
+        kwargs["value_render_option"] = value_render_option
+    records = worksheet.get_all_records(**kwargs)
+    if not records:
+        return _empty_dataframe(columns)
+
+    df = pd.DataFrame(records)
+    for column in columns:
+        if column not in df.columns:
+            df[column] = ""
+    return df[columns]
+
+
+def load_data() -> pd.DataFrame:
+    worksheets = init_worksheets(get_db_connection())
+    df = _read_records(
+        worksheets["investments"],
+        INVESTMENTS_COLUMNS,
+        value_render_option="UNFORMATTED_VALUE",
+    )
+    for col in ["Quantity", "Price", "Commission", "Total_Cost"]:
+        df[col] = df[col].apply(utils.safe_float)
+    return df
+
+
+def save_data(df: pd.DataFrame) -> None:
+    worksheets = init_worksheets(get_db_connection())
+    ws_inv = worksheets["investments"]
     df_tosave = df.copy()
-    
-    # Convert Date objects to string (JSON serializable)
     if "Date" in df_tosave.columns:
         df_tosave["Date"] = df_tosave["Date"].astype(str)
-        
-    # Handle NaN/None (replace with empty string or 0)
     df_tosave = df_tosave.fillna("")
 
-    # Clear and rewrite (simple but inefficient for huge data, fine for personal app)
     ws_inv.clear()
     ws_inv.append_row(df_tosave.columns.tolist())
-    ws_inv.append_rows(df_tosave.values.tolist())
+    if not df_tosave.empty:
+        ws_inv.append_rows(df_tosave.values.tolist())
 
-@st.cache_data(ttl=600)
-def load_settings():
-    # 1. API Keys -> Load from st.secrets (Read-only security)
-    # 2. Ticker Config -> Load from GSheet "Settings" tab
-    
+
+def load_settings() -> dict:
+    global _SETTINGS_DATA_CACHE, _SETTINGS_DATA_CACHE_TIME
+    # Fast-path: return cached settings if recently loaded
+    if _SETTINGS_DATA_CACHE is not None and (time.time() - _SETTINGS_DATA_CACHE_TIME) < _SETTINGS_CACHE_TTL:
+        return _SETTINGS_DATA_CACHE
     settings = {"api_keys": {}, "ticker_config": {}}
-    
-    # Load API Keys from Secrets
+
     api_keys = utils.get_secret("api_keys")
     if api_keys:
         settings["api_keys"] = api_keys
-    
-    # Load Ticker Config from Sheet
-    sh = get_db_connection()
-    _, ws_settings = init_worksheets(sh)
-    records = ws_settings.get_all_records()
-    
+
+    worksheets = init_worksheets(get_db_connection())
+    records = worksheets["settings"].get_all_records()
+
     config = {}
-    for r in records:
-        if r["Ticker"]:
-            config[r["Ticker"]] = {
-                "source": r.get("Data Source", "Manual"),
-                "type": r.get("Type", "Acción ARG") # Default to some type if missing
+    for row in records:
+        ticker = row.get("Ticker")
+        if ticker:
+            config[ticker] = {
+                "source": row.get("Data Source", "Manual"),
+                "type": row.get("Type", "Acción ARG"),
             }
     settings["ticker_config"] = config
-    
-    # Load other settings from local JSON if exists
-    if os.path.exists("settings.json"):
-        try:
-            with open("settings.json", "r") as f:
-                local_settings = json.load(f)
-                if "fred_api_key" in local_settings:
-                    settings["fred_api_key"] = local_settings["fred_api_key"]
-                if "auto_update_enabled" in local_settings:
-                    settings["auto_update_enabled"] = local_settings["auto_update_enabled"]
-                if "ohlc_auto_update_enabled" in local_settings:
-                    settings["ohlc_auto_update_enabled"] = local_settings["ohlc_auto_update_enabled"]
-                if "ohlc_last_update" in local_settings:
-                    settings["ohlc_last_update"] = local_settings["ohlc_last_update"]
-                if "ohlc_last_status" in local_settings:
-                    settings["ohlc_last_status"] = local_settings["ohlc_last_status"]
-        except Exception as e:
-            st.error(f"Error cargando settings.json local: {e}")
-            
+
+    local_settings = _load_local_settings()
+    for key in (
+        "fred_api_key",
+        "auto_update_enabled",
+        "ohlc_auto_update_enabled",
+        "ohlc_last_update",
+        "ohlc_last_status",
+    ):
+        if key in local_settings:
+            settings[key] = local_settings[key]
+
+    # Persist cache
+    _SETTINGS_DATA_CACHE = settings
+    _SETTINGS_DATA_CACHE_TIME = time.time()
     return settings
 
-def save_settings(settings):
-    st.cache_data.clear()
-    sh = get_db_connection()
-    _, ws_settings = init_worksheets(sh)
-    
-    # Prepare dataframe
+
+def save_settings(settings: dict) -> None:
+    worksheets = init_worksheets(get_db_connection())
+    ws_settings = worksheets["settings"]
+
     config_data = []
     for ticker, info in settings.get("ticker_config", {}).items():
         if isinstance(info, dict):
-            config_data.append({
-                "Ticker": ticker, 
-                "Data Source": info.get("source", "Manual"),
-                "Type": info.get("type", "Acción ARG")
-            })
+            config_data.append(
+                {
+                    "Ticker": ticker,
+                    "Data Source": info.get("source", "Manual"),
+                    "Type": info.get("type", "Acción ARG"),
+                }
+            )
         else:
-            # Migration path for old format
-            config_data.append({
-                "Ticker": ticker, 
-                "Data Source": info,
-                "Type": "Acción ARG"
-            })
-            
-    df_config = pd.DataFrame(config_data)
+            config_data.append({"Ticker": ticker, "Data Source": info, "Type": "Acción ARG"})
 
+    df_config = pd.DataFrame(config_data)
     ws_settings.clear()
-    ws_settings.append_row(["Ticker", "Data Source", "Type"])
+    ws_settings.append_row(SETTINGS_COLUMNS)
     if not df_config.empty:
         ws_settings.append_rows(df_config.values.tolist())
-            
-    # Save extra settings to local JSON
+
     local_settings = {}
-    if os.path.exists("settings.json"):
-        try:
-            with open("settings.json", "r") as f:
-                local_settings = json.load(f)
-        except:
-            pass
-            
-    if "fred_api_key" in settings:
-        local_settings["fred_api_key"] = settings["fred_api_key"]
-    if "auto_update_enabled" in settings:
-        local_settings["auto_update_enabled"] = settings["auto_update_enabled"]
-    if "ohlc_auto_update_enabled" in settings:
-        local_settings["ohlc_auto_update_enabled"] = settings["ohlc_auto_update_enabled"]
-    if "ohlc_last_update" in settings:
-        local_settings["ohlc_last_update"] = settings["ohlc_last_update"]
-    if "ohlc_last_status" in settings:
-        local_settings["ohlc_last_status"] = settings["ohlc_last_status"]
-        
     try:
-        with open("settings.json", "w") as f:
-            json.dump(local_settings, f, indent=4)
-    except Exception as e:
-        print(f"Error guardando settings extras: {e}")
+        local_settings = _load_local_settings()
+    except DatabaseError:
+        local_settings = {}
 
-@st.cache_data(ttl=600)
-def load_platforms():
-    sh = get_db_connection()
+    for key in (
+        "fred_api_key",
+        "auto_update_enabled",
+        "ohlc_auto_update_enabled",
+        "ohlc_last_update",
+        "ohlc_last_status",
+    ):
+        if key in settings:
+            local_settings[key] = settings[key]
+
+    _save_local_settings(local_settings)
+
+
+def load_platforms() -> pd.DataFrame:
+    worksheets = init_worksheets(get_db_connection())
     try:
-        ws = sh.worksheet("Platforms")
-        records = ws.get_all_records()
-        if not records:
-             return pd.DataFrame(columns=["Platform", "Entry Commission", "Entry Type", "Exit Commission", "Exit Type", "Commission Currency"])
-        df = pd.DataFrame(records)
-        # Ensure numeric
-        for col in ["Entry Commission", "Exit Commission"]:
-            df[col] = df[col].apply(utils.safe_float)
-        return df
-    except:
-        return pd.DataFrame(columns=["Platform", "Entry Commission", "Entry Type", "Exit Commission", "Exit Type", "Commission Currency"])
+        ws = worksheets["platforms"]
+    except KeyError as exc:
+        raise DatabaseError("No se encontró la hoja Platforms.") from exc
 
-def save_platforms(df):
-    st.cache_data.clear()
-    sh = get_db_connection()
-    try:
-        ws = sh.worksheet("Platforms")
-        ws.clear()
-        ws.append_row(df.columns.tolist())
-        if not df.empty:
-            ws.append_rows(df.values.tolist())
-    except Exception as e:
-        st.error(f"Error al guardar plataformas: {e}")
+    df = _read_records(ws, PLATFORMS_COLUMNS)
+    for col in ["Entry Commission", "Exit Commission"]:
+        df[col] = df[col].apply(utils.safe_float)
+    return df
 
-@st.cache_data(ttl=600)
-def load_earnings():
-    sh = get_db_connection()
-    try:
-        ws = sh.worksheet("Earnings")
-        data = ws.get_all_records(value_render_option='UNFORMATTED_VALUE')
-        if data:
-            df = pd.DataFrame(data)
-            # Ensure all expected columns exist
-            expected_cols = ["Date", "Ticker", "Platform", "Type", "Currency", "Amount", "Capital_Reduction"]
-            for col in expected_cols:
-                if col not in df.columns:
-                    df[col] = ""
 
-            # Ensure numeric types
-            numeric_cols = ["Amount", "Capital_Reduction"]
-            for col in numeric_cols:
-                if col in df.columns:
-                    df[col] = df[col].apply(utils.safe_float)
-            return df
-        else:
-            return pd.DataFrame(columns=["Date", "Ticker", "Platform", "Type", "Currency", "Amount", "Capital_Reduction"])
-    except:
-        return pd.DataFrame(columns=["Date", "Ticker", "Platform", "Type", "Currency", "Amount", "Capital_Reduction"])
+def save_platforms(df: pd.DataFrame) -> None:
+    worksheets = init_worksheets(get_db_connection())
+    ws = worksheets["platforms"]
+    ws.clear()
+    ws.append_row(df.columns.tolist())
+    if not df.empty:
+        ws.append_rows(df.values.tolist())
 
-def save_earnings(df):
-    st.cache_data.clear()
-    sh = get_db_connection()
-    try:
-        ws = sh.worksheet("Earnings")
-        
-        df_tosave = df.copy()
-        if "Date" in df_tosave.columns:
-            df_tosave["Date"] = df_tosave["Date"].astype(str)
-        df_tosave = df_tosave.fillna("")
 
-        ws.clear()
-        ws.append_row(df_tosave.columns.tolist())
-        if not df_tosave.empty:
-            ws.append_rows(df_tosave.values.tolist())
-    except Exception as e:
-        st.error(f"Error al guardar beneficios: {e}")
+def load_earnings() -> pd.DataFrame:
+    worksheets = init_worksheets(get_db_connection())
+    df = _read_records(
+        worksheets["earnings"],
+        EARNINGS_COLUMNS,
+        value_render_option="UNFORMATTED_VALUE",
+    )
+    for col in ["Amount", "Capital_Reduction"]:
+        df[col] = df[col].apply(utils.safe_float)
+    return df
+
+
+def save_earnings(df: pd.DataFrame) -> None:
+    worksheets = init_worksheets(get_db_connection())
+    ws = worksheets["earnings"]
+
+    df_tosave = df.copy()
+    if "Date" in df_tosave.columns:
+        df_tosave["Date"] = df_tosave["Date"].astype(str)
+    df_tosave = df_tosave.fillna("")
+
+    ws.clear()
+    ws.append_row(df_tosave.columns.tolist())
+    if not df_tosave.empty:
+        ws.append_rows(df_tosave.values.tolist())
