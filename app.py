@@ -66,6 +66,53 @@ def get_semaphore_service():
     return SemaphoreService(repository=repository, history_service=history_service)
 
 
+def refresh_semaphore_assets() -> dict:
+    history_service = get_history_service()
+    indicator_engine = get_indicator_engine()
+    semaphore_service = get_semaphore_service()
+
+    results = {
+        "history_updated_tickers": 0,
+        "history_saved_bars": 0,
+        "indicator_updated_tickers": 0,
+        "indicator_skipped_tickers": 0,
+        "semaphore_updated_tickers": 0,
+        "failed_tickers": 0,
+        "errors": [],
+    }
+
+    semaphore_rows = semaphore_service.repository.list_semaphore_configs()
+    for row in semaphore_rows:
+        ticker = AnalyzedTicker(
+            id=row["ticker_id"],
+            symbol=row["symbol"],
+            market=row["market"],
+            asset_type=row["asset_type"],
+            timeframe=row["timeframe"],
+            is_active=bool(row.get("is_active", 1)),
+        )
+        try:
+            saved_bars = history_service.sync_missing_for_ticker(row, end_date=datetime.date.today())
+            if saved_bars > 0:
+                results["history_updated_tickers"] += 1
+                results["history_saved_bars"] += saved_bars
+
+            indicator_config = indicator_engine.repository.get_indicator_config(ticker.id)
+            if indicator_config is not None:
+                indicator_engine.generate(ticker)
+                results["indicator_updated_tickers"] += 1
+            else:
+                results["indicator_skipped_tickers"] += 1
+
+            semaphore_service.calculate(ticker, persist_missing=True)
+            results["semaphore_updated_tickers"] += 1
+        except Exception as exc:
+            results["failed_tickers"] += 1
+            results["errors"].append(f"{ticker.symbol}|{ticker.market}|{ticker.timeframe}: {exc}")
+
+    return results
+
+
 def bars_to_df(bars):
     if not bars:
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -322,22 +369,30 @@ def render_semaphore_dashboard_section() -> None:
     refresh_col, _ = st.columns([1, 3])
     with refresh_col:
         if st.button("Recalcular semaforo", use_container_width=True):
-            try:
-                result = semaphore_service.calculate_all(persist_missing=True)
-                st.session_state["semaphore_dashboard_refresh"] = result
-                if result["failed_tickers"] > 0:
-                    st.warning(
-                        f"Semaforo recalculado con fallos: {result['updated_tickers']} actualizados, {result['failed_tickers']} fallos."
-                    )
-                    if result["errors"]:
-                        st.caption(" | ".join(result["errors"]))
-                else:
-                    st.success(
-                        f"Semaforo recalculado: {result['updated_tickers']} tickers actualizados."
-                    )
-                st.rerun()
-            except Exception as e:
-                st.error(f"No se pudo recalcular el semaforo: {e}")
+            with st.spinner("Actualizando precios, indicadores y semaforo..."):
+                try:
+                    result = refresh_semaphore_assets()
+                    st.session_state["semaphore_dashboard_refresh"] = result
+                    if result["failed_tickers"] > 0:
+                        st.warning(
+                            "Actualizacion parcial del semaforo: "
+                            f"{result['semaphore_updated_tickers']} semaforos, "
+                            f"{result['indicator_updated_tickers']} indicadores, "
+                            f"{result['history_saved_bars']} velas guardadas, "
+                            f"{result['failed_tickers']} fallos."
+                        )
+                        if result["errors"]:
+                            st.caption(" | ".join(result["errors"]))
+                    else:
+                        st.success(
+                            "Semaforo actualizado: "
+                            f"{result['semaphore_updated_tickers']} tickers, "
+                            f"{result['indicator_updated_tickers']} indicadores recalculados, "
+                            f"{result['history_saved_bars']} velas nuevas."
+                        )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo recalcular el semaforo: {e}")
 
     render_semaphore_overview(semaphore_rows)
 
