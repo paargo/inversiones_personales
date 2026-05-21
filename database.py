@@ -103,8 +103,58 @@ def _build_credentials():
 _SETTINGS_CACHE = None
 _SETTINGS_CACHE_TIME = 0
 _SETTINGS_CACHE_TTL = 60  # seconds for sheet object
+_WORKSHEETS_CACHE = None
+_WORKSHEETS_CACHE_TIME = 0
+_WORKSHEETS_CACHE_TTL = 300
 _SETTINGS_DATA_CACHE = None
 _SETTINGS_DATA_CACHE_TIME = 0
+_DATA_CACHE = {}
+_DATA_CACHE_TIME = {}
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    msg = str(exc) if exc is not None else ""
+    return "429" in msg or "Too Many Requests" in msg or "quota" in msg.lower()
+
+
+def _call_with_retries(func, *args, **kwargs):
+    for attempt in range(5):
+        try:
+            return func(*args, **kwargs)
+        except Exception as exc:
+            if attempt < 4 and _is_quota_error(exc):
+                time.sleep(2 ** attempt)
+                continue
+            raise
+
+
+def _cache_is_valid(cache_time: float, ttl: int) -> bool:
+    return cache_time > 0 and (time.time() - cache_time) < ttl
+
+
+def _get_cached_value(cache_key: str, ttl: int):
+    cache_time = _DATA_CACHE_TIME.get(cache_key, 0)
+    if _cache_is_valid(cache_time, ttl):
+        return _DATA_CACHE.get(cache_key)
+    return None
+
+
+def _set_cached_value(cache_key: str, value) -> None:
+    _DATA_CACHE[cache_key] = value
+    _DATA_CACHE_TIME[cache_key] = time.time()
+
+
+def _invalidate_cache(*cache_keys: str) -> None:
+    global _WORKSHEETS_CACHE, _WORKSHEETS_CACHE_TIME, _SETTINGS_DATA_CACHE, _SETTINGS_DATA_CACHE_TIME
+    for cache_key in cache_keys:
+        _DATA_CACHE.pop(cache_key, None)
+        _DATA_CACHE_TIME.pop(cache_key, None)
+    if "worksheets" in cache_keys:
+        _WORKSHEETS_CACHE = None
+        _WORKSHEETS_CACHE_TIME = 0
+    if "settings" in cache_keys:
+        _SETTINGS_DATA_CACHE = None
+        _SETTINGS_DATA_CACHE_TIME = 0
 
 def get_db_connection():
     """Connect to Google Sheets using Streamlit secrets or a local credentials file.
@@ -114,31 +164,16 @@ def get_db_connection():
     """
     global _SETTINGS_CACHE, _SETTINGS_CACHE_TIME
     _ensure_google_dependencies()
-    # Simple in-process cache to avoid hitting Sheets on every call
-    if _SETTINGS_CACHE is not None and (time.time() - _SETTINGS_CACHE_TIME) < _SETTINGS_CACHE_TTL:
-        # We can't reuse the Sheets client from cache directly here since it returns a
-        # Sheet object, but we keep the behavior controlled: if cache exists, return it
+    if _SETTINGS_CACHE is not None and _cache_is_valid(_SETTINGS_CACHE_TIME, _SETTINGS_CACHE_TTL):
         return _SETTINGS_CACHE  # type: ignore
     try:
-        # Retry loop for transient errors like 429
-        for attempt in range(5):
-            try:
-                creds = _build_credentials()
-                client = gspread.authorize(creds)
-                sheet_name = utils.get_secret("sheet_name") or DEFAULT_SHEET_NAME
-                sh = client.open(sheet_name)
-                # Cache the open sheet object for quick reuse in this session
-                _SETTINGS_CACHE = sh
-                _SETTINGS_CACHE_TIME = time.time()
-                return sh
-            except Exception as exc:
-                # Detect common quota errors
-                msg = str(exc) if exc is not None else ""
-                if attempt < 4 and ("429" in msg or "Too Many Requests" in msg or "quota" in msg.lower()):
-                    backoff = 2 ** attempt
-                    time.sleep(backoff)
-                    continue
-                raise
+        creds = _build_credentials()
+        client = gspread.authorize(creds)
+        sheet_name = utils.get_secret("sheet_name") or DEFAULT_SHEET_NAME
+        sh = _call_with_retries(client.open, sheet_name)
+        _SETTINGS_CACHE = sh
+        _SETTINGS_CACHE_TIME = time.time()
+        return sh
     except DatabaseError:
         raise
     except Exception as exc:
@@ -147,44 +182,53 @@ def get_db_connection():
 
 def init_worksheets(sh):
     """Ensure required worksheets exist and basic schema is upgraded."""
+    global _WORKSHEETS_CACHE, _WORKSHEETS_CACHE_TIME
+    if _WORKSHEETS_CACHE is not None and _cache_is_valid(_WORKSHEETS_CACHE_TIME, _WORKSHEETS_CACHE_TTL):
+        return _WORKSHEETS_CACHE
     try:
-        try:
-            ws_inv = sh.worksheet("Investments")
-        except gspread.WorksheetNotFound:
+        worksheet_map = {ws.title: ws for ws in _call_with_retries(sh.worksheets)}
+
+        ws_inv = worksheet_map.get("Investments")
+        if ws_inv is None:
             ws_inv = sh.add_worksheet(title="Investments", rows=1000, cols=20)
             ws_inv.append_row(INVESTMENTS_COLUMNS)
+            worksheet_map["Investments"] = ws_inv
 
-        try:
-            ws_platforms = sh.worksheet("Platforms")
-        except gspread.WorksheetNotFound:
+        ws_platforms = worksheet_map.get("Platforms")
+        if ws_platforms is None:
             ws_platforms = sh.add_worksheet(title="Platforms", rows=100, cols=10)
             ws_platforms.append_row(PLATFORMS_COLUMNS)
             ws_platforms.append_rows(DEFAULT_PLATFORM_ROWS)
+            worksheet_map["Platforms"] = ws_platforms
 
-        try:
-            ws_settings = sh.worksheet("Settings")
-            headers = ws_settings.row_values(1)
+        ws_settings = worksheet_map.get("Settings")
+        if ws_settings is not None:
+            headers = _call_with_retries(ws_settings.row_values, 1)
             if "Type" not in headers:
                 ws_settings.update_cell(1, 3, "Type")
-        except gspread.WorksheetNotFound:
+        else:
             ws_settings = sh.add_worksheet(title="Settings", rows=100, cols=5)
             ws_settings.append_row(SETTINGS_COLUMNS)
+            worksheet_map["Settings"] = ws_settings
 
-        try:
-            ws_earn = sh.worksheet("Earnings")
-            headers_earn = ws_earn.row_values(1)
+        ws_earn = worksheet_map.get("Earnings")
+        if ws_earn is not None:
+            headers_earn = _call_with_retries(ws_earn.row_values, 1)
             if "Platform" not in headers_earn:
                 ws_earn.insert_cols([["Platform"]], col=3)
-        except gspread.WorksheetNotFound:
+        else:
             ws_earn = sh.add_worksheet(title="Earnings", rows=1000, cols=10)
             ws_earn.append_row(EARNINGS_COLUMNS)
+            worksheet_map["Earnings"] = ws_earn
 
-        return {
+        _WORKSHEETS_CACHE = {
             "investments": ws_inv,
             "platforms": ws_platforms,
             "settings": ws_settings,
             "earnings": ws_earn,
         }
+        _WORKSHEETS_CACHE_TIME = time.time()
+        return _WORKSHEETS_CACHE
     except Exception as exc:
         raise DatabaseError(f"Error de inicialización de hojas: {exc}") from exc
 
@@ -193,7 +237,7 @@ def _read_records(worksheet, columns: list[str], *, value_render_option=None) ->
     kwargs = {}
     if value_render_option is not None:
         kwargs["value_render_option"] = value_render_option
-    records = worksheet.get_all_records(**kwargs)
+    records = _call_with_retries(worksheet.get_all_records, **kwargs)
     if not records:
         return _empty_dataframe(columns)
 
@@ -205,6 +249,9 @@ def _read_records(worksheet, columns: list[str], *, value_render_option=None) ->
 
 
 def load_data() -> pd.DataFrame:
+    cached = _get_cached_value("investments", ttl=30)
+    if cached is not None:
+        return cached.copy()
     worksheets = init_worksheets(get_db_connection())
     df = _read_records(
         worksheets["investments"],
@@ -213,6 +260,7 @@ def load_data() -> pd.DataFrame:
     )
     for col in ["Quantity", "Price", "Commission", "Total_Cost"]:
         df[col] = df[col].apply(utils.safe_float)
+    _set_cached_value("investments", df.copy())
     return df
 
 
@@ -228,6 +276,7 @@ def save_data(df: pd.DataFrame) -> None:
     ws_inv.append_row(df_tosave.columns.tolist())
     if not df_tosave.empty:
         ws_inv.append_rows(df_tosave.values.tolist())
+    _invalidate_cache("investments")
 
 
 def load_settings() -> dict:
@@ -242,7 +291,10 @@ def load_settings() -> dict:
         settings["api_keys"] = api_keys
 
     worksheets = init_worksheets(get_db_connection())
-    records = worksheets["settings"].get_all_records()
+    records = _get_cached_value("settings_records", ttl=30)
+    if records is None:
+        records = _call_with_retries(worksheets["settings"].get_all_records)
+        _set_cached_value("settings_records", records)
 
     config = {}
     for row in records:
@@ -311,9 +363,13 @@ def save_settings(settings: dict) -> None:
             local_settings[key] = settings[key]
 
     _save_local_settings(local_settings)
+    _invalidate_cache("settings", "settings_records")
 
 
 def load_platforms() -> pd.DataFrame:
+    cached = _get_cached_value("platforms", ttl=30)
+    if cached is not None:
+        return cached.copy()
     worksheets = init_worksheets(get_db_connection())
     try:
         ws = worksheets["platforms"]
@@ -323,6 +379,7 @@ def load_platforms() -> pd.DataFrame:
     df = _read_records(ws, PLATFORMS_COLUMNS)
     for col in ["Entry Commission", "Exit Commission"]:
         df[col] = df[col].apply(utils.safe_float)
+    _set_cached_value("platforms", df.copy())
     return df
 
 
@@ -333,9 +390,13 @@ def save_platforms(df: pd.DataFrame) -> None:
     ws.append_row(df.columns.tolist())
     if not df.empty:
         ws.append_rows(df.values.tolist())
+    _invalidate_cache("platforms")
 
 
 def load_earnings() -> pd.DataFrame:
+    cached = _get_cached_value("earnings", ttl=30)
+    if cached is not None:
+        return cached.copy()
     worksheets = init_worksheets(get_db_connection())
     df = _read_records(
         worksheets["earnings"],
@@ -344,6 +405,7 @@ def load_earnings() -> pd.DataFrame:
     )
     for col in ["Amount", "Capital_Reduction"]:
         df[col] = df[col].apply(utils.safe_float)
+    _set_cached_value("earnings", df.copy())
     return df
 
 
@@ -360,3 +422,4 @@ def save_earnings(df: pd.DataFrame) -> None:
     ws.append_row(df_tosave.columns.tolist())
     if not df_tosave.empty:
         ws.append_rows(df_tosave.values.tolist())
+    _invalidate_cache("earnings")
