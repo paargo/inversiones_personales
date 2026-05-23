@@ -8,6 +8,9 @@
         "BTC": "Binance API"
     },
     "fred_api_key": "757f1dbbd63fbac660b4f423a47e7d76",
+    "manual_price_overrides": {
+        "DNC3O": 102.66
+    },
     "ohlc_auto_update_enabled": true,
     "ohlc_last_update": "2026-05-21T22:37+00:00",
     "ohlc_last_status": "updated_tickers=4; saved_bars=82; failed_tickers=0"

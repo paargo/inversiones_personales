@@ -52,6 +52,13 @@ def get_quantity_factor(asset_type: str) -> float:
     return 0.01 if asset_type in FIXED_INCOME_ASSET_TYPES else 1.0
 
 
+def get_manual_price_override(settings: dict, ticker: str) -> float:
+    overrides = settings.get("manual_price_overrides", {})
+    if not isinstance(overrides, dict):
+        return 0.0
+    return utils.safe_float(overrides.get(ticker, 0.0))
+
+
 @st.cache_resource
 def get_history_service():
     repository = SqliteMarketHistoryRepository("market_history.sqlite")
@@ -1023,6 +1030,7 @@ def main():
                         tic = row["Ticker"]
                         inf = ticker_config.get(tic, {})
                         src = inf.get("source", "Manual") if isinstance(inf, dict) else inf
+                        manual_price = get_manual_price_override(settings, tic)
                         if src != "Manual":
                             p, cur, prev = md.get_market_price(tic, src)
                             if p > 0:
@@ -1031,6 +1039,14 @@ def main():
                                 st.session_state["Current Price (USD)"][tic] = p_u
                                 prev_u = prev if cur in ["USD", "USDT"] else (prev / mep_rate if mep_rate > 0 else 0)
                                 st.session_state["Prev Close Price (USD)"][tic] = prev_u
+                            elif manual_price > 0:
+                                st.session_state["Native Price"][tic] = {"price": manual_price, "currency": "USD"}
+                                st.session_state["Current Price (USD)"][tic] = manual_price
+                                st.session_state["Prev Close Price (USD)"][tic] = manual_price
+                        elif manual_price > 0:
+                            st.session_state["Native Price"][tic] = {"price": manual_price, "currency": "USD"}
+                            st.session_state["Current Price (USD)"][tic] = manual_price
+                            st.session_state["Prev Close Price (USD)"][tic] = manual_price
                     st.session_state["prices_updated"] = True
                     st.session_state["last_update_time"] = datetime.datetime.now()
                     st.rerun()
@@ -1045,8 +1061,13 @@ def main():
                     "Updated Value (USD)": f"{total_val:,.2f}"
                 }])
                 df_ed = grouped_df[edit_cols].copy()
+                df_ed.loc[df_ed["Total_Cost"] <= 0, ["Total_Cost", "Avg Buy Price"]] = pd.NA
+                df_ed.loc[df_ed["Current Price (USD)"] <= 0, ["Current Price (USD)", "Updated Value (USD)"]] = pd.NA
+                df_ed.loc[grouped_df["Total_Cost_Base"] <= 0, "Result (%)"] = "N/D"
                 for c in ["Quantity", "Total_Cost", "Avg Buy Price", "Updated Value (USD)", "Result ($)"]:
-                    df_ed[c] = df_ed[c].apply(lambda x: f"{x:,.6f}" if "Quantity" in c else f"{x:+,.2f}" if "Chg" in c or "Result" in c else f"{x:,.2f}")
+                    df_ed[c] = df_ed[c].apply(
+                        lambda x: "" if pd.isna(x) else f"{x:,.6f}" if "Quantity" in c else f"{x:+,.2f}" if "Chg" in c or "Result" in c else f"{x:,.2f}"
+                    )
                 df_ed["Day Chg (%)"] = df_ed["Day Chg (%)"].apply(lambda x: f"{x:+.2%}")
                 df_ed = pd.concat([df_ed, total_row_ed], ignore_index=True)
 
@@ -1093,9 +1114,11 @@ def main():
                 
                 d_df = b_df[disp_c].copy()
                 d_df["Date"] = pd.to_datetime(d_df["Date"]).dt.date
+                d_df.loc[d_df["Total_Cost_USD"] <= 0, "Result (%)"] = pd.NA
+                d_df.loc[d_df["Current Price (USD)"] <= 0, ["Current Price (USD)", "Updated Value (USD)"]] = pd.NA
                 for c in ["Total_Cost_USD", "Updated Value (USD)", "Result ($)"]:
-                    d_df[c] = d_df[c].apply(lambda x: f"{x:+,.2f}" if "Result ($)" in c else f"{x:,.2f}")
-                d_df["Result (%)"] = d_df["Result (%)"].apply(lambda x: f"{x:+.2%}")
+                    d_df[c] = d_df[c].apply(lambda x: "" if pd.isna(x) else f"{x:+,.2f}" if "Result ($)" in c else f"{x:,.2f}")
+                d_df["Result (%)"] = d_df["Result (%)"].apply(lambda x: "N/D" if pd.isna(x) else f"{x:+.2%}")
                 
                 tr = pd.DataFrame([{"Date": "TOTAL", "Platform": "", "Ticker": "", "Quantity": "", "Price": "", "Currency": "",
                                     "Total_Cost_USD": f"{grouped_df['Total_Cost'].sum():,.2f}", "Current Price (USD)": "",

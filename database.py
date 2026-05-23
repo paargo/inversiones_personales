@@ -313,6 +313,7 @@ def load_settings() -> dict:
         "ohlc_auto_update_enabled",
         "ohlc_last_update",
         "ohlc_last_status",
+        "manual_price_overrides",
     ):
         if key in local_settings:
             settings[key] = local_settings[key]
@@ -358,6 +359,7 @@ def save_settings(settings: dict) -> None:
         "ohlc_auto_update_enabled",
         "ohlc_last_update",
         "ohlc_last_status",
+        "manual_price_overrides",
     ):
         if key in settings:
             local_settings[key] = settings[key]
