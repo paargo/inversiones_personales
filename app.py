@@ -38,6 +38,18 @@ from market_history_service import (
 
 # Configuration constants
 PRICE_UPDATE_INTERVAL_MINUTES = 30
+FIXED_INCOME_ASSET_TYPES = {"Obligación Negociable", "Bono"}
+
+
+def get_ticker_asset_type(ticker_config: dict, ticker: str) -> str:
+    info = ticker_config.get(ticker, {})
+    if isinstance(info, dict):
+        return str(info.get("type", "Acción ARG"))
+    return "Acción ARG"
+
+
+def get_quantity_factor(asset_type: str) -> float:
+    return 0.01 if asset_type in FIXED_INCOME_ASSET_TYPES else 1.0
 
 
 @st.cache_resource
@@ -722,6 +734,7 @@ def main():
             ticker = st.text_input("Ingresar Nuevo Ticker").upper()
         else:
             ticker = selected_ticker_opt
+        entry_asset_type = get_ticker_asset_type(ticker_config, ticker) if ticker else "Acción ARG"
 
         with st.form("entry_form"):
             col1, col2 = st.columns(2)
@@ -740,6 +753,7 @@ def main():
                 # Parse inputs
                 quantity = utils.safe_float(quantity_input)
                 price = utils.safe_float(price_input)
+                quantity_factor = get_quantity_factor(entry_asset_type)
                 
             # Automation logic (look up platform)
             comm_val = 0.0
@@ -755,7 +769,7 @@ def main():
             # Calculate total for display
             total_preview = 0.0
             if quantity and price:
-                base_cost = quantity * price
+                base_cost = (quantity * quantity_factor) * price
                 if comm_type == "Amount":
                     if comm_curr == "BTC":
                         comm_cost = comm_val * price
@@ -775,7 +789,7 @@ def main():
                     st.error("Por favor completa Ticker, Cantidad y Precio correctamente.")
                 else:
                     # Final Calculation
-                    base_cost = quantity * price
+                    base_cost = (quantity * quantity_factor) * price
                     if comm_type == "Amount":
                         if comm_curr == "BTC":
                             final_commission_val = comm_val * price
@@ -865,7 +879,7 @@ def main():
                 default_curr_idx = 0
                 if asset_type == "Crypto":
                     default_curr_idx = 3 # Crypto
-                elif asset_type in ["CEDEAR", "Acción EEUU", "Obligación Negociable", "Fondo Común de Inversión"]:
+                elif asset_type in ["Cedear", "CEDEAR", "Acción EEUU", "Obligación Negociable", "Fondo Común de Inversión"]:
                     default_curr_idx = 1 # USD MEP (Common for these in ARG, though FCI ARS exists too)
 
                 currency = st.selectbox("Moneda", currency_options, index=default_curr_idx)
@@ -933,7 +947,13 @@ def main():
 
             settings = db.load_settings()
             ticker_config = settings.get("ticker_config", {})
-            grouped_df["Avg Buy Price"] = grouped_df["Total_Cost"] / grouped_df["Quantity"]
+            grouped_df["Asset Type"] = grouped_df["Ticker"].apply(lambda tic: get_ticker_asset_type(ticker_config, tic))
+            grouped_df["Quantity Factor"] = grouped_df["Asset Type"].apply(get_quantity_factor)
+            grouped_df["Effective Quantity"] = grouped_df["Quantity"] * grouped_df["Quantity Factor"]
+            grouped_df["Avg Buy Price"] = grouped_df.apply(
+                lambda row: (row["Total_Cost"] / row["Effective Quantity"]) if row["Effective Quantity"] > 0 else 0.0,
+                axis=1,
+            )
             
             if "Current Price (USD)" not in st.session_state: st.session_state["Current Price (USD)"] = {}
             if "Native Price" not in st.session_state: st.session_state["Native Price"] = {}
@@ -942,16 +962,16 @@ def main():
 
             # Map storage to DF
             grouped_df["Current Price (USD)"] = grouped_df["Ticker"].map(st.session_state["Current Price (USD)"]).fillna(0.0)
-            grouped_df["Updated Value (USD)"] = (grouped_df["Quantity"] * grouped_df["Current Price (USD)"]) + grouped_df["Amount_USD"]
+            grouped_df["Updated Value (USD)"] = (grouped_df["Effective Quantity"] * grouped_df["Current Price (USD)"]) + grouped_df["Amount_USD"]
             grouped_df["Result ($)"] = grouped_df["Updated Value (USD)"] - grouped_df["Total_Cost_Base"]
             grouped_df["Result (%)"] = grouped_df.apply(
                 lambda row: f"{(row['Updated Value (USD)'] / row['Total_Cost_Base'] - 1):+.2%}" if row["Total_Cost_Base"] > 0 else "0.00%", 
                 axis=1
             )
             grouped_df["Prev Close (USD)"] = grouped_df["Ticker"].map(st.session_state.get("Prev Close Price (USD)", {})).fillna(0.0)
-            grouped_df["Day Chg ($)"] = grouped_df["Quantity"] * (grouped_df["Current Price (USD)"] - grouped_df["Prev Close (USD)"])
+            grouped_df["Day Chg ($)"] = grouped_df["Effective Quantity"] * (grouped_df["Current Price (USD)"] - grouped_df["Prev Close (USD)"])
             grouped_df["Day Chg (%)"] = grouped_df.apply(
-                lambda row: (row["Day Chg ($)"] / (row["Quantity"] * row["Prev Close (USD)"])) if (row["Quantity"] * row["Prev Close (USD)"]) > 0 else 0.0,
+                lambda row: (row["Day Chg ($)"] / (row["Effective Quantity"] * row["Prev Close (USD)"])) if (row["Effective Quantity"] * row["Prev Close (USD)"]) > 0 else 0.0,
                 axis=1
             )
 
@@ -959,7 +979,7 @@ def main():
             total_res = grouped_df["Result ($)"].sum()
             total_res_pct = (total_val / grouped_df["Total_Cost_Base"].sum() - 1) if grouped_df["Total_Cost_Base"].sum() > 0 else 0
             day_chg_u = grouped_df["Day Chg ($)"].sum()
-            total_prev = (grouped_df["Quantity"] * grouped_df["Prev Close (USD)"]).sum()
+            total_prev = (grouped_df["Effective Quantity"] * grouped_df["Prev Close (USD)"]).sum()
             day_chg_p = (day_chg_u / total_prev) if total_prev > 0 else 0.0
 
             # --- 2. Top UI: Metrics and Delta ---
@@ -1054,8 +1074,11 @@ def main():
                 # Detailed breakdown table
                 b_df = df.copy()
                 b_df["Type"] = "Compra"
+                b_df["Asset Type"] = b_df["Ticker"].apply(lambda tic: get_ticker_asset_type(ticker_config, tic))
+                b_df["Quantity Factor"] = b_df["Asset Type"].apply(get_quantity_factor)
+                b_df["Effective Quantity"] = b_df["Quantity"] * b_df["Quantity Factor"]
                 b_df["Current Price (USD)"] = b_df["Ticker"].map(st.session_state["Current Price (USD)"]).fillna(0.0)
-                b_df["Updated Value (USD)"] = b_df["Quantity"] * b_df["Current Price (USD)"]
+                b_df["Updated Value (USD)"] = b_df["Effective Quantity"] * b_df["Current Price (USD)"]
                 b_df["Result ($)"] = b_df["Updated Value (USD)"] - b_df["Total_Cost_USD"]
                 b_df["Result (%)"] = b_df.apply(lambda r: (r["Updated Value (USD)"] / r["Total_Cost_USD"] - 1) if r["Total_Cost_USD"] > 0 else 0.0, axis=1)
                 
@@ -1113,19 +1136,20 @@ def main():
                             re, cr = df_earn[me]["Amount_USD"].sum(), df_earn[me]["Cap_Red_USD"].sum()
                         mv = re
                         for t, q in cf.groupby("Ticker")["Quantity"].sum().items():
+                            effective_quantity = q * get_quantity_factor(get_ticker_asset_type(ticker_config, t))
                             # For today, prioritize real-time prices from session_state
                             if is_today and t in st.session_state.get("Current Price (USD)", {}):
                                 p = st.session_state["Current Price (USD)"][t]
-                                mv += q * p
+                                mv += effective_quantity * p
                             elif t in hp.columns:
                                 ph = hp[t].loc[:d]
                                 p = ph.iloc[-1] if not ph.empty else 0
                                 # Fallback to session_state if historical is NaN for today
                                 if pd.isna(p) and is_today:
                                     p = st.session_state.get("Current Price (USD)", {}).get(t, 0)
-                                mv += q * (p if not pd.isna(p) else 0)
+                                mv += effective_quantity * (p if not pd.isna(p) else 0)
                             else: 
-                                mv += q * st.session_state["Current Price (USD)"].get(t, 0)
+                                mv += effective_quantity * st.session_state["Current Price (USD)"].get(t, 0)
                         cd_item = {"Date": d, "Invested Capital (USD)": ic - cr, "Market Value (USD)": mv}
                         
                         if cpi_series is not None and not cpi_series.empty:
