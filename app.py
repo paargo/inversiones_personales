@@ -3,6 +3,7 @@ import pandas as pd
 import datetime
 import json
 import os
+import unicodedata
 try:
     from streamlit_autorefresh import st_autorefresh
 except ModuleNotFoundError:
@@ -38,7 +39,6 @@ from market_history_service import (
 
 # Configuration constants
 PRICE_UPDATE_INTERVAL_MINUTES = 30
-FIXED_INCOME_ASSET_TYPES = {"Obligación Negociable", "Bono"}
 
 
 def get_ticker_asset_type(ticker_config: dict, ticker: str) -> str:
@@ -48,8 +48,18 @@ def get_ticker_asset_type(ticker_config: dict, ticker: str) -> str:
     return "Acción ARG"
 
 
+def normalize_asset_type(asset_type: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(asset_type)).encode("ascii", "ignore").decode("ascii")
+    normalized = normalized.replace("?", "")
+    return " ".join(normalized.lower().split())
+
+
 def get_quantity_factor(asset_type: str) -> float:
-    return 0.01 if asset_type in FIXED_INCOME_ASSET_TYPES else 1.0
+    normalized = normalize_asset_type(asset_type)
+    is_on = "oblig" in normalized and "negoci" in normalized
+    is_bond = "bono" in normalized
+    is_short_on = normalized == "on"
+    return 0.01 if is_on or is_bond or is_short_on else 1.0
 
 
 def get_manual_price_override(settings: dict, ticker: str) -> float:
