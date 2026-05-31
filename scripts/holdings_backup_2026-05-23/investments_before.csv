@@ -1,6 +1,6 @@
 Date,Ticker,Platform,Quantity,Price,Currency,Commission,Commission_Type,Commission_Currency,Total_Cost
-2026-01-20,SPYD,Bull Market Brokers,3.0,35.33,USD,0.52995,Percentage,USD,105.99
-2026-02-18,SPYD,Bull Market Brokers,3.0,34.4,USD,1.0,Amount,USD,104.19999999999999
+2026-01-20,SPYD,Bull Market Brokers,9.0,11.776666666666667,USD,0.52995,Percentage,USD,105.99
+2026-02-18,SPYD,Bull Market Brokers,9.0,11.466666666666667,USD,1.0,Amount,USD,104.19999999999999
 2026-02-19,BTC,Binance,8e-05,66233.39,USD,8e-08,Amount,BTC,5.2986712
 2026-02-19,BTC,Binance,7e-05,66233.39,USD,7e-08,Amount,BTC,4.6363373
 2026-02-12,BTC,Binance,0.00015,65663.92,USD,1.5e-07,Amount,BTC,9.849588
@@ -37,4 +37,4 @@ Date,Ticker,Platform,Quantity,Price,Currency,Commission,Commission_Type,Commissi
 2026-02-27,BTC,Binance,0.00015,65580.61,USDT,1.0,Percentage,BTC,9.935462415
 2026-03-06,BTC,Binance,0.00015,68362.48,USD,1.0,Percentage,BTC,10.356915719999998
 2026-03-27,BTC,Binance,0.0003,66660.38,USD,1.0,Percentage,BTC,20.19809514
-2026-04-17,SPYD,Bull Market Brokers,3.0,36.978,USD,1.0,Amount,USD,111.934
+2026-04-17,SPYD,Bull Market Brokers,9.0,12.326,USD,1.0,Amount,USD,111.934

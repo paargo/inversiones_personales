@@ -360,6 +360,7 @@ def save_settings(settings: dict) -> None:
         "ohlc_last_update",
         "ohlc_last_status",
         "manual_price_overrides",
+        "split_events",
     ):
         if key in settings:
             local_settings[key] = settings[key]

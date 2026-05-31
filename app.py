@@ -62,6 +62,70 @@ def get_quantity_factor(asset_type: str) -> float:
     return 0.01 if is_on or is_bond or is_short_on else 1.0
 
 
+def _normalize_split_date(value):
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return pd.Timestamp(parsed).normalize()
+
+
+def normalize_split_events(raw_events) -> dict:
+    normalized = {}
+    if isinstance(raw_events, dict):
+        iterable = []
+        for ticker, events in raw_events.items():
+            if isinstance(events, list):
+                iterable.extend((ticker, event) for event in events)
+            else:
+                iterable.append((ticker, events))
+    elif isinstance(raw_events, list):
+        iterable = []
+        for event in raw_events:
+            if isinstance(event, dict):
+                ticker = event.get("Ticker") or event.get("ticker") or event.get("symbol") or ""
+                iterable.append((ticker, event))
+    else:
+        iterable = []
+
+    for ticker_hint, event in iterable:
+        if not isinstance(event, dict):
+            continue
+
+        ticker = str(event.get("Ticker") or event.get("ticker") or ticker_hint or "").strip().upper()
+        if not ticker:
+            continue
+
+        date_value = event.get("Date") or event.get("date") or event.get("Effective Date") or event.get("effective_date")
+        event_date = _normalize_split_date(date_value)
+        ratio = utils.safe_float(event.get("Ratio", event.get("ratio", 0.0)))
+        if event_date is None or ratio <= 0:
+            continue
+
+        normalized.setdefault(ticker, []).append({"date": event_date, "ratio": ratio})
+
+    for ticker in normalized:
+        normalized[ticker].sort(key=lambda item: item["date"])
+    return normalized
+
+
+def get_split_factor(split_events_by_ticker: dict, ticker: str, from_date, to_date=None) -> float:
+    ticker_key = str(ticker).strip().upper()
+    events = split_events_by_ticker.get(ticker_key, [])
+    if not events:
+        return 1.0
+
+    start_date = _normalize_split_date(from_date)
+    end_date = _normalize_split_date(to_date if to_date is not None else datetime.date.today())
+    if start_date is None or end_date is None or end_date < start_date:
+        return 1.0
+
+    factor = 1.0
+    for event in events:
+        if start_date <= event["date"] <= end_date:
+            factor *= event["ratio"]
+    return factor
+
+
 def get_manual_price_override(settings: dict, ticker: str) -> float:
     overrides = settings.get("manual_price_overrides", {})
     if not isinstance(overrides, dict):
@@ -953,20 +1017,32 @@ def main():
                     lambda r: pd.Series(earn_to_usd(r)), axis=1
                 )
             
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
             df["Total_Cost_USD"] = df.apply(to_usd, axis=1)
-            grouped_inv = df.groupby(["Platform", "Ticker"])[["Quantity", "Total_Cost_USD"]].sum().reset_index()
+            settings = db.load_settings()
+            ticker_config = settings.get("ticker_config", {})
+            split_events = normalize_split_events(settings.get("split_events", []))
+            current_date = pd.Timestamp(datetime.date.today())
+
+            df["Asset Type"] = df["Ticker"].apply(lambda tic: get_ticker_asset_type(ticker_config, tic))
+            df["Quantity Factor"] = df["Asset Type"].apply(get_quantity_factor)
+            df["Split Factor"] = df.apply(
+                lambda row: get_split_factor(split_events, row["Ticker"], row["Date"], current_date),
+                axis=1,
+            )
+            df["Effective Quantity"] = df["Quantity"] * df["Quantity Factor"] * df["Split Factor"]
+
+            grouped_inv = df.groupby(["Platform", "Ticker"])[["Effective Quantity", "Total_Cost_USD"]].sum().reset_index()
             ticker_earnings = df_earn.groupby(["Platform", "Ticker"])[["Amount_USD", "Cap_Red_USD"]].sum().reset_index() if not df_earn.empty else pd.DataFrame(columns=["Platform", "Ticker", "Amount_USD", "Cap_Red_USD"])
             
             grouped_df = grouped_inv.copy()
+            grouped_df = grouped_df.rename(columns={"Effective Quantity": "Quantity"})
             grouped_df = grouped_df.rename(columns={"Total_Cost_USD": "Total_Cost_Base"})
             grouped_df = pd.merge(grouped_df, ticker_earnings, on=["Platform", "Ticker"], how="left").fillna(0)
             grouped_df["Total_Cost"] = grouped_df["Total_Cost_Base"] - grouped_df["Cap_Red_USD"]
-
-            settings = db.load_settings()
-            ticker_config = settings.get("ticker_config", {})
             grouped_df["Asset Type"] = grouped_df["Ticker"].apply(lambda tic: get_ticker_asset_type(ticker_config, tic))
             grouped_df["Quantity Factor"] = grouped_df["Asset Type"].apply(get_quantity_factor)
-            grouped_df["Effective Quantity"] = grouped_df["Quantity"] * grouped_df["Quantity Factor"]
+            grouped_df["Effective Quantity"] = grouped_df["Quantity"]
             grouped_df["Avg Buy Price"] = grouped_df.apply(
                 lambda row: (row["Total_Cost"] / row["Effective Quantity"]) if row["Effective Quantity"] > 0 else 0.0,
                 axis=1,
@@ -1105,18 +1181,16 @@ def main():
                 # Detailed breakdown table
                 b_df = df.copy()
                 b_df["Type"] = "Compra"
-                b_df["Asset Type"] = b_df["Ticker"].apply(lambda tic: get_ticker_asset_type(ticker_config, tic))
-                b_df["Quantity Factor"] = b_df["Asset Type"].apply(get_quantity_factor)
-                b_df["Effective Quantity"] = b_df["Quantity"] * b_df["Quantity Factor"]
                 b_df["Current Price (USD)"] = b_df["Ticker"].map(st.session_state["Current Price (USD)"]).fillna(0.0)
-                b_df["Updated Value (USD)"] = b_df["Effective Quantity"] * b_df["Current Price (USD)"]
+                b_df["Adjusted Quantity"] = b_df["Effective Quantity"]
+                b_df["Updated Value (USD)"] = b_df["Adjusted Quantity"] * b_df["Current Price (USD)"]
                 b_df["Result ($)"] = b_df["Updated Value (USD)"] - b_df["Total_Cost_USD"]
                 b_df["Result (%)"] = b_df.apply(lambda r: (r["Updated Value (USD)"] / r["Total_Cost_USD"] - 1) if r["Total_Cost_USD"] > 0 else 0.0, axis=1)
                 
-                disp_c = ["Date", "Platform", "Ticker", "Type", "Quantity", "Price", "Currency", "Total_Cost_USD", "Current Price (USD)", "Updated Value (USD)", "Result ($)", "Result (%)"]
+                disp_c = ["Date", "Platform", "Ticker", "Type", "Adjusted Quantity", "Price", "Currency", "Total_Cost_USD", "Current Price (USD)", "Updated Value (USD)", "Result ($)", "Result (%)"]
                 if not df_earn.empty:
                     e_d = df_earn.copy()
-                    e_d["Quantity"], e_d["Price"], e_d["Current Price (USD)"], e_d["Result (%)"] = 0.0, 0.0, 0.0, 0.0
+                    e_d["Adjusted Quantity"], e_d["Price"], e_d["Current Price (USD)"], e_d["Result (%)"] = 0.0, 0.0, 0.0, 0.0
                     e_d["Total_Cost_USD"] = -e_d["Cap_Red_USD"]
                     e_d["Updated Value (USD)"] = e_d["Amount_USD"]
                     e_d["Result ($)"] = e_d["Amount_USD"]
@@ -1168,8 +1242,13 @@ def main():
                             me = pd.to_datetime(df_earn["Date"]) <= d
                             re, cr = df_earn[me]["Amount_USD"].sum(), df_earn[me]["Cap_Red_USD"].sum()
                         mv = re
-                        for t, q in cf.groupby("Ticker")["Quantity"].sum().items():
-                            effective_quantity = q * get_quantity_factor(get_ticker_asset_type(ticker_config, t))
+                        for _, row in cf.iterrows():
+                            t = row["Ticker"]
+                            effective_quantity = (
+                                row["Quantity"]
+                                * row["Quantity Factor"]
+                                * get_split_factor(split_events, t, row["Date"], d)
+                            )
                             # For today, prioritize real-time prices from session_state
                             if is_today and t in st.session_state.get("Current Price (USD)", {}):
                                 p = st.session_state["Current Price (USD)"][t]
@@ -1181,7 +1260,7 @@ def main():
                                 if pd.isna(p) and is_today:
                                     p = st.session_state.get("Current Price (USD)", {}).get(t, 0)
                                 mv += effective_quantity * (p if not pd.isna(p) else 0)
-                            else: 
+                            else:
                                 mv += effective_quantity * st.session_state["Current Price (USD)"].get(t, 0)
                         cd_item = {"Date": d, "Invested Capital (USD)": ic - cr, "Market Value (USD)": mv}
                         
@@ -1630,7 +1709,64 @@ def main():
 
         st.divider()
 
-        # 2. Platform Configuration
+        # 2. Split Adjustments
+        st.markdown("### Ajustes por Splits")
+        st.caption("Carga cada split con su ticker, fecha efectiva y ratio. La cartera ajusta la cantidad desde esa fecha.")
+
+        split_rows = []
+        raw_split_events = settings.get("split_events", [])
+        if isinstance(raw_split_events, list):
+            for event in raw_split_events:
+                if not isinstance(event, dict):
+                    continue
+                split_rows.append({
+                    "Ticker": str(event.get("Ticker") or event.get("ticker") or "").strip().upper(),
+                    "Effective Date": str(
+                        event.get("Date")
+                        or event.get("date")
+                        or event.get("Effective Date")
+                        or event.get("effective_date")
+                        or ""
+                    ),
+                    "Split Ratio": utils.safe_float(event.get("Ratio", event.get("ratio", 0.0))),
+                })
+
+        split_df = pd.DataFrame(split_rows, columns=["Ticker", "Effective Date", "Split Ratio"])
+        edited_split_df = st.data_editor(
+            split_df,
+            column_config={
+                "Ticker": st.column_config.TextColumn("Ticker", required=True),
+                "Effective Date": st.column_config.TextColumn("Effective Date (YYYY-MM-DD)", required=True),
+                "Split Ratio": st.column_config.NumberColumn("Split Ratio", format="%.6f"),
+            },
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            key="split_editor_v1",
+        )
+
+        if st.button("Guardar Ajustes por Splits"):
+            new_split_events = []
+            for _, row in edited_split_df.iterrows():
+                ticker_str = str(row.get("Ticker", "")).strip().upper()
+                date_str = str(row.get("Effective Date", "")).strip()
+                ratio = utils.safe_float(row.get("Split Ratio", 0.0))
+                parsed_date = pd.to_datetime(date_str, errors="coerce")
+                if ticker_str and ratio > 0 and not pd.isna(parsed_date):
+                    new_split_events.append({
+                        "ticker": ticker_str,
+                        "date": pd.Timestamp(parsed_date).normalize().date().isoformat(),
+                        "ratio": ratio,
+                    })
+
+            settings["split_events"] = sorted(new_split_events, key=lambda item: (item["ticker"], item["date"]))
+            db.save_settings(settings)
+            st.success("Ajustes por splits guardados.")
+            st.rerun()
+
+        st.divider()
+
+        # 3. Platform Configuration
         st.markdown("### Configuración de Plataformas")
         st.markdown("Configura comisiones de entrada/salida y moneda por plataforma.")
         
@@ -1659,7 +1795,7 @@ def main():
 
         st.divider()
 
-        # 3. Ticker Configuration
+        # 4. Ticker Configuration
         st.markdown("### Configuración de Tickers")
         st.markdown("Selecciona de dónde obtener datos para cada activo o agrega nuevos.")
         
