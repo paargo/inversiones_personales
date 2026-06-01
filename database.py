@@ -86,6 +86,13 @@ def _save_local_settings(payload: dict) -> None:
         raise DatabaseError(f"No se pudo guardar {SETTINGS_FILE}: {exc}") from exc
 
 
+def _get_file_mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
 def has_google_credentials() -> bool:
     return bool(utils.get_secret("gcp_service_account")) or os.path.exists(CREDENTIALS_FILE)
 
@@ -108,6 +115,7 @@ _WORKSHEETS_CACHE_TIME = 0
 _WORKSHEETS_CACHE_TTL = 300
 _SETTINGS_DATA_CACHE = None
 _SETTINGS_DATA_CACHE_TIME = 0
+_SETTINGS_FILE_MTIME = 0.0
 _DATA_CACHE = {}
 _DATA_CACHE_TIME = {}
 
@@ -280,9 +288,14 @@ def save_data(df: pd.DataFrame) -> None:
 
 
 def load_settings() -> dict:
-    global _SETTINGS_DATA_CACHE, _SETTINGS_DATA_CACHE_TIME
+    global _SETTINGS_DATA_CACHE, _SETTINGS_DATA_CACHE_TIME, _SETTINGS_FILE_MTIME
+    current_settings_mtime = _get_file_mtime(SETTINGS_FILE)
     # Fast-path: return cached settings if recently loaded
-    if _SETTINGS_DATA_CACHE is not None and (time.time() - _SETTINGS_DATA_CACHE_TIME) < _SETTINGS_CACHE_TTL:
+    if (
+        _SETTINGS_DATA_CACHE is not None
+        and (time.time() - _SETTINGS_DATA_CACHE_TIME) < _SETTINGS_CACHE_TTL
+        and current_settings_mtime == _SETTINGS_FILE_MTIME
+    ):
         return _SETTINGS_DATA_CACHE
     settings = {"api_keys": {}, "ticker_config": {}}
 
@@ -321,10 +334,12 @@ def load_settings() -> dict:
     # Persist cache
     _SETTINGS_DATA_CACHE = settings
     _SETTINGS_DATA_CACHE_TIME = time.time()
+    _SETTINGS_FILE_MTIME = current_settings_mtime
     return settings
 
 
 def save_settings(settings: dict) -> None:
+    global _SETTINGS_FILE_MTIME
     worksheets = init_worksheets(get_db_connection())
     ws_settings = worksheets["settings"]
 
@@ -366,6 +381,7 @@ def save_settings(settings: dict) -> None:
             local_settings[key] = settings[key]
 
     _save_local_settings(local_settings)
+    _SETTINGS_FILE_MTIME = _get_file_mtime(SETTINGS_FILE)
     _invalidate_cache("settings", "settings_records")
 
 
