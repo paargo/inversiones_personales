@@ -16,6 +16,11 @@
             "ticker": "SPYD",
             "date": "2026-05-29",
             "ratio": 3.0
+        },
+        {
+            "ticker": "SPY",
+            "date": "2026-05-29",
+            "ratio": 3.0
         }
     ],
     "ohlc_auto_update_enabled": true,
