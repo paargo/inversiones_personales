@@ -327,6 +327,7 @@ def load_settings() -> dict:
         "ohlc_last_update",
         "ohlc_last_status",
         "manual_price_overrides",
+        "split_events",
     ):
         if key in local_settings:
             settings[key] = local_settings[key]
